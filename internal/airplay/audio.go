@@ -747,6 +747,26 @@ func composeAudioREDPayload(primary []byte, primaryRTP uint32, previous []audioR
 	return append(payload, primary...)
 }
 
+// audioREDHeaderLength returns the clear RFC 2198 header prefix. Receivers
+// must parse this prefix before they can locate and decrypt the compound codec
+// payload, so it is deliberately outside the encrypted region.
+func audioREDHeaderLength(payload []byte) (int, error) {
+	for offset := 0; ; offset += 4 {
+		if offset >= len(payload) {
+			return 0, fmt.Errorf("RFC 2198 payload is missing its primary header")
+		}
+		if payload[offset]&0x7f != audioDataPayloadType {
+			return 0, fmt.Errorf("RFC 2198 block payload type is %d, want %d", payload[offset]&0x7f, audioDataPayloadType)
+		}
+		if payload[offset]&0x80 == 0 {
+			return offset + 1, nil
+		}
+		if offset+4 > len(payload) {
+			return 0, fmt.Errorf("RFC 2198 payload has a truncated redundant header")
+		}
+	}
+}
+
 func (as *AudioStream) maximumPlainAudioPayloadBytes() int {
 	overhead := 12
 	if as.chachaCipher != nil {
@@ -790,7 +810,11 @@ func (as *AudioStream) sendAudioPacketWithPayloadTypeAndNonce(payload []byte, rt
 func (as *AudioStream) sendAudioREDPacket(redPayload, primary []byte, rtpTime uint32, seq uint16) error {
 	as.mu.Lock()
 	defer as.mu.Unlock()
-	redPacket, _ := as.buildAudioPacketLocked(redPayload, rtpTime, seq, audioREDPayloadType, nil)
+	clearPrefix, err := audioREDHeaderLength(redPayload)
+	if err != nil {
+		return err
+	}
+	redPacket, _ := as.buildAudioPacketWithClearPrefixLocked(redPayload, clearPrefix, rtpTime, seq, audioREDPayloadType, nil)
 	primaryPacket, _ := as.buildAudioPacketLocked(primary, rtpTime, seq, audioDataPayloadType, nil)
 	as.rememberAudioPacket(seq, primaryPacket)
 	if _, err := as.conn.WriteTo(redPacket, as.remoteAddr); err != nil {
@@ -801,6 +825,13 @@ func (as *AudioStream) sendAudioREDPacket(redPayload, primary []byte, rtpTime ui
 }
 
 func (as *AudioStream) buildAudioPacketLocked(payload []byte, rtpTime uint32, seq uint16, payloadType byte, reuseNonce *uint64) ([]byte, uint64) {
+	return as.buildAudioPacketWithClearPrefixLocked(payload, 0, rtpTime, seq, payloadType, reuseNonce)
+}
+
+func (as *AudioStream) buildAudioPacketWithClearPrefixLocked(payload []byte, clearPrefix int, rtpTime uint32, seq uint16, payloadType byte, reuseNonce *uint64) ([]byte, uint64) {
+	if clearPrefix < 0 || clearPrefix > len(payload) {
+		panic("invalid clear audio payload prefix")
+	}
 
 	// RTP header: 12 bytes
 	header := make([]byte, 12)
@@ -811,46 +842,53 @@ func (as *AudioStream) buildAudioPacketLocked(payload []byte, rtpTime uint32, se
 	binary.BigEndian.PutUint32(header[8:12], as.ssrc)
 
 	// Encrypt payload according to the negotiated audio security mode.
+	clearPayload := payload[:clearPrefix]
+	protectedPayload := payload[clearPrefix:]
 	packetPayload := payload
 	usedNonce := uint64(0)
 	if as.chachaCipher != nil {
 		var nonce [audioChaChaNonceSize]byte
 		usedNonce, nonce = as.nextAudioChaChaNonce(seq, rtpTime, reuseNonce)
 		aad := as.audioChaChaAAD(header, rtpTime)
-		sealed := as.chachaCipher.Seal(nil, nonce[:], payload, aad)
-		packetPayload = make([]byte, len(sealed)+8)
-		copy(packetPayload, sealed)
-		binary.LittleEndian.PutUint64(packetPayload[len(sealed):], usedNonce)
+		sealed := as.chachaCipher.Seal(nil, nonce[:], protectedPayload, aad)
+		packetPayload = make([]byte, len(clearPayload)+len(sealed)+audioChaChaNonceSize)
+		copy(packetPayload, clearPayload)
+		copy(packetPayload[len(clearPayload):], sealed)
+		binary.LittleEndian.PutUint64(packetPayload[len(clearPayload)+len(sealed):], usedNonce)
 		if seq <= 3 {
 			tagStart := len(sealed) - as.chachaCipher.Overhead()
 			if tagStart < 0 {
 				tagStart = 0
 			}
-			dbg("[AUDIO-CHACHA] seq=%d nonce=%d aad=%s plain=%d sealed=%d tag=%02x tail=%02x",
-				seq, usedNonce, as.chachaAADMode.String(), len(payload), len(sealed), sealed[tagStart:], packetPayload[len(sealed):])
+			dbg("[AUDIO-CHACHA] seq=%d nonce=%d aad=%s clear=%d plain=%d sealed=%d tag=%02x tail=%02x",
+				seq, usedNonce, as.chachaAADMode.String(), len(clearPayload), len(protectedPayload), len(sealed),
+				sealed[tagStart:], packetPayload[len(packetPayload)-audioChaChaNonceSize:])
 		}
 	} else if as.cipher != nil && as.aesIV != nil {
-		packetPayload = aesEncryptAudioPayload(as.cipher, as.aesIV, payload)
+		encrypted := aesEncryptAudioPayload(as.cipher, as.aesIV, protectedPayload)
+		packetPayload = make([]byte, len(clearPayload)+len(encrypted))
+		copy(packetPayload, clearPayload)
+		copy(packetPayload[len(clearPayload):], encrypted)
 
 		// Self-decrypt check on first packet to verify key/IV correctness
 		if seq == 1 {
 			blockSize := as.cipher.BlockSize()
-			encLen := (len(packetPayload) / blockSize) * blockSize
+			encryptedPayload := packetPayload[len(clearPayload):]
+			encLen := (len(encryptedPayload) / blockSize) * blockSize
 			if encLen > 0 {
-				decrypted := make([]byte, len(packetPayload))
-				copy(decrypted, packetPayload)
+				decrypted := append([]byte(nil), encryptedPayload...)
 				dec := cipher.NewCBCDecrypter(as.cipher, as.aesIV)
 				dec.CryptBlocks(decrypted[:encLen], decrypted[:encLen])
 				match := true
-				for i := 0; i < len(payload); i++ {
-					if decrypted[i] != payload[i] {
+				for i := 0; i < len(protectedPayload); i++ {
+					if decrypted[i] != protectedPayload[i] {
 						match = false
 						break
 					}
 				}
 				dbg("[AUDIO] *** SELF-DECRYPT CHECK: match=%v", match)
-				dbg("[AUDIO] *** plaintext first 16: %02x", payload[:min(16, len(payload))])
-				dbg("[AUDIO] *** encrypted first 16: %02x", packetPayload[:min(16, len(packetPayload))])
+				dbg("[AUDIO] *** plaintext first 16: %02x", protectedPayload[:min(16, len(protectedPayload))])
+				dbg("[AUDIO] *** encrypted first 16: %02x", encryptedPayload[:min(16, len(encryptedPayload))])
 				dbg("[AUDIO] *** decrypted first 16: %02x", decrypted[:min(16, len(decrypted))])
 				dbg("[AUDIO] *** IV: %02x", as.aesIV)
 			}

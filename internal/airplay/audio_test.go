@@ -173,7 +173,7 @@ func TestStreamAudioUsesRFC2198ForAdvertisedReceiver(t *testing.T) {
 	}
 }
 
-func TestCompoundRFC2198PayloadIsEncryptedAsOnePacket(t *testing.T) {
+func TestCompoundRFC2198LeavesHeadersClearAndEncryptsCodecDataAsOneRegion(t *testing.T) {
 	for _, security := range []string{"plaintext", "AES", "ChaCha"} {
 		t.Run(security, func(t *testing.T) {
 			conn := &recordingPacketConn{}
@@ -209,6 +209,13 @@ func TestCompoundRFC2198PayloadIsEncryptedAsOnePacket(t *testing.T) {
 			}
 			if got := decodeAudioPacketPayloadForTest(t, stream, security, packet); !bytes.Equal(got, plain) {
 				t.Fatalf("decoded RED payload = %x, want %x", got, plain)
+			}
+			clearPrefix, err := audioREDHeaderLength(plain)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(packet[12:12+clearPrefix], plain[:clearPrefix]) {
+				t.Fatalf("wire RED header = %x, want clear header %x", packet[12:12+clearPrefix], plain[:clearPrefix])
 			}
 			retransmit := stream.audioPacketForRetransmit(3)
 			if len(retransmit) < 12 || retransmit[1] != audioDataPayloadType {
@@ -344,22 +351,31 @@ func streamAudioPacketsForCodecTest(t *testing.T, security string, frames audioP
 func decodeAudioPacketPayloadForTest(t *testing.T, stream *AudioStream, security string, packet []byte) []byte {
 	t.Helper()
 	payload := packet[12:]
+	clearPrefix := 0
+	if packet[1]&0x7f == audioREDPayloadType {
+		var err error
+		clearPrefix, err = audioREDHeaderLength(payload)
+		if err != nil {
+			t.Fatalf("parse clear RED header: %v", err)
+		}
+	}
 	switch security {
 	case "AES":
 		plain := append([]byte(nil), payload...)
-		length := len(plain) / stream.cipher.BlockSize() * stream.cipher.BlockSize()
-		cipher.NewCBCDecrypter(stream.cipher, stream.aesIV).CryptBlocks(plain[:length], plain[:length])
+		protected := plain[clearPrefix:]
+		length := len(protected) / stream.cipher.BlockSize() * stream.cipher.BlockSize()
+		cipher.NewCBCDecrypter(stream.cipher, stream.aesIV).CryptBlocks(protected[:length], protected[:length])
 		return plain
 	case "ChaCha":
-		if len(payload) < audioChaChaNonceSize {
+		if len(payload)-clearPrefix < audioChaChaNonceSize {
 			t.Fatalf("ChaCha payload is only %d bytes", len(payload))
 		}
 		nonce := payload[len(payload)-audioChaChaNonceSize:]
-		plain, err := stream.chachaCipher.Open(nil, nonce, payload[:len(payload)-audioChaChaNonceSize], packet[4:12])
+		plain, err := stream.chachaCipher.Open(nil, nonce, payload[clearPrefix:len(payload)-audioChaChaNonceSize], packet[4:12])
 		if err != nil {
 			t.Fatalf("authenticate sequence %d: %v", binary.BigEndian.Uint16(packet[2:4]), err)
 		}
-		return plain
+		return append(append([]byte(nil), payload[:clearPrefix]...), plain...)
 	default:
 		return payload
 	}
