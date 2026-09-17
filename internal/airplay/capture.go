@@ -83,6 +83,9 @@ type ScreenCapture struct {
 	stopped  bool
 	stopOnce sync.Once
 	stderr   *captureStderrTail
+	// Synthetic relays have no process exit status. Their readers own terminal
+	// errors even after waitCh closes; treating that channel as EOF loses them.
+	streamOnly bool
 }
 
 type pipeWirePortalSession interface {
@@ -1783,6 +1786,9 @@ func startPreparedX11Capture(startupCtx, lifetimeCtx context.Context, cfg Captur
 }
 
 func (sc *ScreenCapture) Read(buf []byte) (int, error) {
+	if sc.streamOnly {
+		return sc.stdout.Read(buf)
+	}
 	if prefixed, ok := sc.stdout.(*prefixedReadCloser); ok && prefixed.hasPrefix() {
 		return prefixed.Read(buf)
 	}
@@ -1803,6 +1809,9 @@ func (sc *ScreenCapture) Read(buf []byte) (int, error) {
 func (sc *ScreenCapture) ReadVideoAccessUnit() (VideoAccessUnit, error) {
 	if sc == nil || sc.frames == nil {
 		return VideoAccessUnit{}, fmt.Errorf("capture does not provide timestamped access units")
+	}
+	if sc.streamOnly {
+		return sc.frames.ReadVideoAccessUnit()
 	}
 	if prefetched, ok := sc.frames.(*prefetchedVideoAccessUnitReader); ok && prefetched.hasPrefetchedUnit() {
 		return prefetched.ReadVideoAccessUnit()

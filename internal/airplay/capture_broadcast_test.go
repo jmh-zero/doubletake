@@ -192,15 +192,15 @@ func TestBroadcastSinkNonblockingFrameQueueUsesNominalDuration(t *testing.T) {
 	base := time.Now()
 	// A large or backward PTS gap can be caused by the upstream leaky queue; it
 	// must not turn one queued picture into an artificial duration overflow.
-	for i, offset := range []time.Duration{0, time.Second, -time.Second} {
+	for i, offset := range []time.Duration{0, time.Second, -time.Second, 0, 0, 0, 0, 0} {
 		frame := VideoAccessUnit{AnnexB: []byte{byte(i + 1)}, PTS: base.Add(offset)}
 		if err := sink.enqueueFrame(frame); err != nil {
 			t.Fatalf("enqueue frame %d at %v: %v", i, offset, err)
 		}
 	}
-	fourth := VideoAccessUnit{AnnexB: []byte{4}, PTS: base.Add(2 * time.Second)}
-	if err := sink.enqueueFrame(fourth); !errors.Is(err, errBroadcastSinkBacklog) {
-		t.Fatalf("enqueue fourth nominal 30fps frame = %v, want backlog error", err)
+	next := VideoAccessUnit{AnnexB: []byte{9}, PTS: base.Add(-time.Second)}
+	if err := sink.enqueueFrame(next); !errors.Is(err, errBroadcastSinkBacklog) {
+		t.Fatalf("enqueue ninth nominal 30fps frame = %v, want backlog error", err)
 	}
 }
 
@@ -210,9 +210,9 @@ func TestBroadcastSinkNominalDurationUsesConfiguredFrameRate(t *testing.T) {
 		acceptedFrames  int
 		rejectedOrdinal int
 	}{
-		{fps: 20, acceptedFrames: 2, rejectedOrdinal: 3},
-		{fps: 30, acceptedFrames: 3, rejectedOrdinal: 4},
-		{fps: 60, acceptedFrames: 5, rejectedOrdinal: 6},
+		{fps: 20, acceptedFrames: 5, rejectedOrdinal: 6},
+		{fps: 30, acceptedFrames: 8, rejectedOrdinal: 9},
+		{fps: 60, acceptedFrames: 16, rejectedOrdinal: 17},
 	} {
 		t.Run(fmt.Sprintf("%dfps", test.fps), func(t *testing.T) {
 			broadcast := NewBroadcastCaptureWithFrameRate(nil, test.fps)
@@ -245,18 +245,12 @@ func TestBroadcastSinkRejectsFrameAtExactDurationThreshold(t *testing.T) {
 	if err := sink.enqueueFrame(third); !errors.Is(err, errBroadcastSinkBacklog) {
 		t.Fatalf("enqueue at exact threshold = %v, want backlog error", err)
 	}
-	first, err := sink.ReadVideoAccessUnit()
-	if err != nil || !bytes.Equal(first.AnnexB, []byte{1}) {
-		t.Fatalf("first queued frame after rejected enqueue = (%x, %v), want 01", first.AnnexB, err)
+	frame, err := sink.ReadVideoAccessUnit()
+	if len(frame.AnnexB) != 0 || !errors.Is(err, errBroadcastSinkBacklog) {
+		t.Fatalf("read after terminal overflow = (%x, %v), want backlog error", frame.AnnexB, err)
 	}
-	if err := sink.enqueueFrame(third); err != nil {
-		t.Fatalf("enqueue after draining below threshold: %v", err)
-	}
-	for _, want := range []byte{2, 3} {
-		frame, err := sink.ReadVideoAccessUnit()
-		if err != nil || !bytes.Equal(frame.AnnexB, []byte{want}) {
-			t.Fatalf("queued frame = (%x, %v), want %02x", frame.AnnexB, err, want)
-		}
+	if err := sink.enqueueFrame(third); !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("enqueue after terminal overflow = %v, want closed pipe", err)
 	}
 }
 
@@ -421,7 +415,7 @@ func TestBackpressuredByteBroadcastHandoff(t *testing.T) {
 
 func TestLoneSharedTimestampedSinkDoesNotBackpressureCapture(t *testing.T) {
 	base := time.Now()
-	frames := make([]VideoAccessUnit, 4)
+	frames := make([]VideoAccessUnit, 10)
 	for i := range frames {
 		frames[i] = VideoAccessUnit{
 			AnnexB: []byte{byte(i + 1)},
@@ -449,8 +443,8 @@ func TestLoneSharedTimestampedSinkDoesNotBackpressureCapture(t *testing.T) {
 		<-runDone
 		t.Fatal("a lone shared sink backpressured the timestamped source")
 	}
-	if n, err := slow.ReadVideoAccessUnit(); len(n.AnnexB) != 0 || !errors.Is(err, io.EOF) {
-		t.Fatalf("overflowed shared sink read = (%x, %v), want empty EOF", n.AnnexB, err)
+	if n, err := slow.ReadVideoAccessUnit(); len(n.AnnexB) != 0 || !errors.Is(err, errBroadcastSinkBacklog) {
+		t.Fatalf("overflowed shared sink read = (%x, %v), want backlog error", n.AnnexB, err)
 	}
 }
 
@@ -482,7 +476,7 @@ func TestTimestampedSlowSinkDoesNotStallHealthyPeer(t *testing.T) {
 	}()
 
 	base := time.Now()
-	for i := 0; i < 6; i++ {
+	for i := 0; i < 12; i++ {
 		want := VideoAccessUnit{
 			AnnexB: []byte{byte(i + 1)},
 			PTS:    base.Add(time.Duration(i) * time.Second / 30),
@@ -514,8 +508,8 @@ func TestTimestampedSlowSinkDoesNotStallHealthyPeer(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("broadcast did not finish")
 	}
-	if n, err := slow.ReadVideoAccessUnit(); len(n.AnnexB) != 0 || !errors.Is(err, io.EOF) {
-		t.Fatalf("overflowed slow sink read = (%x, %v), want empty EOF", n.AnnexB, err)
+	if n, err := slow.ReadVideoAccessUnit(); len(n.AnnexB) != 0 || !errors.Is(err, errBroadcastSinkBacklog) {
+		t.Fatalf("overflowed slow sink read = (%x, %v), want backlog error", n.AnnexB, err)
 	}
 }
 
@@ -751,8 +745,8 @@ func TestBroadcastCaptureSlowSinkDoesNotStallHealthySink(t *testing.T) {
 	}
 
 	buf := make([]byte, 1)
-	if n, err := slow.Read(buf); n != 0 || !errors.Is(err, io.EOF) {
-		t.Fatalf("overflowed sink read = (%d, %v), want (0, EOF)", n, err)
+	if n, err := slow.Read(buf); n != 0 || !errors.Is(err, errBroadcastSinkBacklog) {
+		t.Fatalf("overflowed sink read = (%d, %v), want backlog error", n, err)
 	}
 }
 
