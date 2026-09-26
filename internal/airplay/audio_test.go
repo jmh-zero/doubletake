@@ -140,24 +140,37 @@ func TestStreamAudioUsesRFC2198ForAdvertisedReceiver(t *testing.T) {
 			if len(packets) != frames {
 				t.Fatalf("RFC 2198 datagrams = %d, want %d", len(packets), frames)
 			}
+			var previousPrimary []byte
 			for index, packet := range packets {
 				seq := uint16(index + 1)
 				if packet[1] != audioREDPayloadType || binary.BigEndian.Uint16(packet[2:4]) != seq {
 					t.Fatalf("packet %d header = %02x/%d, want PT=%d seq=%d", index, packet[1], binary.BigEndian.Uint16(packet[2:4]), audioREDPayloadType, seq)
 				}
 				plain := decodeAudioPacketPayloadForTest(t, stream, security, packet)
-				// Verbatim ALAC is larger than RFC 2198's 10-bit redundant-block
-				// length, so it correctly uses a RED primary block without history.
-				if len(plain) != 1417 || plain[0] != audioDataPayloadType {
-					t.Fatalf("packet %d RED plaintext = len %d prefix %02x, want primary-only ALAC", index, len(plain), plain[:min(len(plain), 1)])
+				redundant, primary := splitAudioREDPayloadForTest(t, plain)
+				if len(primary) == 0 || len(primary) > 1023 {
+					t.Fatalf("packet %d primary ALAC length = %d, want 1..1023", index, len(primary))
+				}
+				if index == 0 {
+					if len(redundant) != 0 {
+						t.Fatalf("first packet carries %d redundant frames, want none", len(redundant))
+					}
+				} else {
+					if len(redundant) != 1 {
+						t.Fatalf("packet %d carries %d redundant frames, want the previous frame", index, len(redundant))
+					}
+					if !bytes.Equal(redundant[0], previousPrimary) {
+						t.Fatalf("packet %d redundant block differs from previous primary", index)
+					}
 				}
 				retransmit := stream.audioPacketForRetransmit(seq)
 				if len(retransmit) < 12 || retransmit[1] != audioDataPayloadType {
 					t.Fatalf("sequence %d retransmit packet is not PT96: %x", seq, retransmit[:min(len(retransmit), 12)])
 				}
-				if got := decodeAudioPacketPayloadForTest(t, stream, security, retransmit); !bytes.Equal(got, plain[1:]) {
+				if got := decodeAudioPacketPayloadForTest(t, stream, security, retransmit); !bytes.Equal(got, primary) {
 					t.Fatalf("sequence %d retransmit primary differs from RED primary", seq)
 				}
+				previousPrimary = append(previousPrimary[:0], primary...)
 				if security == "ChaCha" {
 					redNonce := binary.LittleEndian.Uint64(packet[len(packet)-audioChaChaNonceSize:])
 					primaryNonce := binary.LittleEndian.Uint64(retransmit[len(retransmit)-audioChaChaNonceSize:])
@@ -171,6 +184,38 @@ func TestStreamAudioUsesRFC2198ForAdvertisedReceiver(t *testing.T) {
 			}
 		})
 	}
+}
+
+func splitAudioREDPayloadForTest(t *testing.T, payload []byte) ([][]byte, []byte) {
+	t.Helper()
+	type blockHeader struct {
+		length int
+	}
+	var headers []blockHeader
+	offset := 0
+	for {
+		if offset >= len(payload) || payload[offset]&0x7f != audioDataPayloadType {
+			t.Fatalf("invalid RFC 2198 header at offset %d: %x", offset, payload[:min(len(payload), offset+4)])
+		}
+		if payload[offset]&0x80 == 0 {
+			offset++
+			break
+		}
+		if offset+4 > len(payload) {
+			t.Fatalf("truncated RFC 2198 header: %x", payload)
+		}
+		headers = append(headers, blockHeader{length: int(payload[offset+2]&3)<<8 | int(payload[offset+3])})
+		offset += 4
+	}
+	blocks := make([][]byte, 0, len(headers))
+	for _, header := range headers {
+		if offset+header.length > len(payload) {
+			t.Fatalf("RFC 2198 block length %d exceeds %d-byte payload", header.length, len(payload)-offset)
+		}
+		blocks = append(blocks, payload[offset:offset+header.length])
+		offset += header.length
+	}
+	return blocks, payload[offset:]
 }
 
 func TestCompoundRFC2198LeavesHeadersClearAndEncryptsCodecDataAsOneRegion(t *testing.T) {

@@ -122,6 +122,7 @@ type AudioCapture struct {
 	waitErr   error
 	stopped   bool
 	codec     AudioCodec
+	alac      *alacEncoder
 	eldMu     sync.Mutex
 	eld       *eldEncoder
 }
@@ -219,7 +220,9 @@ func StartAudioCapture(ctx context.Context, testTone bool, codec AudioCodec) (*A
 		waitCh: make(chan struct{}),
 		codec:  codec,
 	}
-	if codec == AudioCodecAACELD {
+	if codec == AudioCodecALAC {
+		ac.alac = &alacEncoder{}
+	} else if codec == AudioCodecAACELD {
 		var err error
 		ac.eld, err = newELDEncoder()
 		if err != nil {
@@ -326,7 +329,10 @@ func (ac *AudioCapture) readFramePosition(buf []byte) (int, audioPCMFramePositio
 		n, err := ac.eld.Encode(pcm, buf)
 		return n, position, err
 	}
-	n := encodeALACVerbatim(buf, pcm, spf, channels, 16)
+	if ac.alac == nil {
+		ac.alac = &alacEncoder{}
+	}
+	n := ac.alac.Encode(buf, pcm)
 	return n, position, nil
 }
 
