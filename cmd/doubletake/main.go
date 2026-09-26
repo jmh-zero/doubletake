@@ -501,7 +501,8 @@ func main() {
 	}
 	defer videoSink.Close()
 	if err := session.StreamFrames(ctx, videoSink.AsCapture(), 0*time.Second); err != nil && ctx.Err() == nil {
-		log.Fatalf("streaming error: %v", err)
+		log.Printf("streaming error: %v", err)
+		return
 	}
 	log.Println("stream ended")
 }
