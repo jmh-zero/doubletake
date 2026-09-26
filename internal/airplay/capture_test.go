@@ -532,11 +532,11 @@ func TestBuildGstVideoPipelineTimestampedOutput(t *testing.T) {
 }
 
 func TestBuildGstHEVCVideoPipelineTimestampedOutput(t *testing.T) {
-	encoder := encoderResult{codec: VideoCodecHEVC, parts: gstStage{"testh265enc"}, rawFormat: "P010_10LE"}
+	encoder := encoderResult{codec: VideoCodecHEVC, parts: gstStage{"testh265enc"}, rawFormat: "NV12"}
 	pipeline := buildGstVideoPipeline(gstStage{"testsrc"}, nil, nil, encoder, 3840, 2160, true)
 	joined := strings.Join(pipeline, " ")
 	for _, want := range []string{
-		"video/x-raw,format=P010_10LE",
+		"video/x-raw,format=NV12",
 		"video/x-raw,width=3840,height=2160,pixel-aspect-ratio=1/1",
 		"testh265enc ! h265parse config-interval=-1",
 		"video/x-h265,stream-format=byte-stream,alignment=au",
@@ -545,6 +545,33 @@ func TestBuildGstHEVCVideoPipelineTimestampedOutput(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("HEVC pipeline %q does not contain %q", joined, want)
 		}
+	}
+}
+
+func TestSelectGstHEVCEncoderUsesMainProfileInput(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		hwaccel   string
+		element   string
+		rawFormat string
+	}{
+		{name: "NVENC", hwaccel: "nvenc", element: "nvh265enc", rawFormat: "NV12"},
+		{name: "x265", hwaccel: "none", element: "x265enc", rawFormat: "I420"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			encoder, err := selectGstEncoderWithProbe(CaptureConfig{
+				VideoCodec: VideoCodecHEVC,
+				HWAccel:    test.hwaccel,
+				FPS:        30,
+				Bitrate:    4_000,
+			}, func(name string) bool { return name == test.element }, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if encoder.codec != VideoCodecHEVC || encoder.rawFormat != test.rawFormat || encoder.parts[0] != test.element {
+				t.Fatalf("encoder = codec %q format %q element %q, want HEVC %q %q", encoder.codec, encoder.rawFormat, encoder.parts[0], test.rawFormat, test.element)
+			}
+		})
 	}
 }
 

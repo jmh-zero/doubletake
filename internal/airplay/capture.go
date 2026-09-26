@@ -755,11 +755,11 @@ func automaticHEVCProfile(hwaccel string, fps int) (bool, time.Duration) {
 	result := value.(*automaticHEVCProbeResult)
 	result.once.Do(func() {
 		// Factory presence alone does not prove that the installed NVIDIA stack
-		// can sustain timestamped 4K Main10 within a useful presentation budget.
+		// can sustain timestamped 4K HEVC Main within a useful presentation budget.
 		// Exercise the actual capture suffix and retain its source-to-AU p95.
 		result.ok, result.lead = probeAutomaticHEVC(fps)
 		if result.ok {
-			dbg("[CAPTURE] automatic HEVC 4K Main10 %dfps probe passed (minimum video lead %v)", fps, result.lead)
+			dbg("[CAPTURE] automatic HEVC 4K Main %dfps probe passed (minimum video lead %v)", fps, result.lead)
 		} else {
 			dbg("[CAPTURE] automatic HEVC %dfps hardware probe failed; retaining H.264", fps)
 		}
@@ -2087,18 +2087,21 @@ func selectGstHEVCEncoder(cfg CaptureConfig, hasElement func(string) bool, annou
 	}
 	candidates := []candidate{
 		{
-			method: "nvenc", element: "nvh265enc", label: "NVENC HEVC Main10 hardware encoding (nvh265enc)",
+			method: "nvenc", element: "nvh265enc", label: "NVENC HEVC Main hardware encoding (nvh265enc)",
 			// NVENC defaults to zero B-frames. On GPUs without HEVC B-frame
 			// support GStreamer omits the bframes property entirely, so even
 			// setting it to zero prevents the pipeline from starting.
-			result: encoderResult{codec: VideoCodecHEVC, rawFormat: "P010_10LE", parts: gstStage{
+			// Screen capture is SDR. Keep the encoder on the 8-bit Main profile;
+			// receivers may advertise HEVC Main without accepting Main10, and the
+			// sender's HDR path selects a display HDR mode before using 10-bit video.
+			result: encoderResult{codec: VideoCodecHEVC, rawFormat: "NV12", parts: gstStage{
 				"nvh265enc", fmt.Sprintf("bitrate=%d", bitrate), fmt.Sprintf("gop-size=%d", keyframeInterval),
 				"rc-mode=cbr", "preset=p3", "tune=ultra-low-latency", "zerolatency=true", "aud=true",
 			}},
 		},
 		{
-			method: "none", element: "x265enc", label: "x265 HEVC Main10 software encoding (x265enc)",
-			result: encoderResult{codec: VideoCodecHEVC, rawFormat: "I420_10LE", parts: gstStage{
+			method: "none", element: "x265enc", label: "x265 HEVC Main software encoding (x265enc)",
+			result: encoderResult{codec: VideoCodecHEVC, rawFormat: "I420", parts: gstStage{
 				"x265enc", fmt.Sprintf("bitrate=%d", bitrate), fmt.Sprintf("key-int-max=%d", keyframeInterval),
 				"speed-preset=superfast", "tune=zerolatency", "option-string=bframes=0:repeat-headers=1:aud=1",
 			}},
