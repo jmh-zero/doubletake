@@ -172,6 +172,8 @@ func (s *MirrorSession) streamHEVCFrames(ctx context.Context, capture *ScreenCap
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-s.streamDone:
+			return s.streamFailure()
 		case <-time.After(startDelay):
 		}
 	}
@@ -187,6 +189,9 @@ func (s *MirrorSession) streamHEVCFrames(ctx context.Context, capture *ScreenCap
 		}
 		unit, err := capture.ReadVideoAccessUnit()
 		if err != nil {
+			if streamErr := s.streamFailure(); streamErr != nil {
+				return streamErr
+			}
 			if err == io.EOF && ctx.Err() != nil {
 				return ctx.Err()
 			}

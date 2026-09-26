@@ -2,14 +2,47 @@ package airplay
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"io"
 	"math"
 	"net"
+	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/chacha20poly1305"
 )
+
+func TestStreamFramesStopsWhenReceiverClosesDataChannel(t *testing.T) {
+	sender, receiver := net.Pipe()
+	reader := &blockingVideoReader{closed: make(chan struct{}), waitCh: make(chan struct{})}
+	capture := &ScreenCapture{stdout: reader, frames: reader, waitCh: reader.waitCh}
+	session := &MirrorSession{
+		dataConn:       sender,
+		firstFrameSent: make(chan struct{}),
+		streamDone:     make(chan struct{}),
+	}
+	go session.monitorDataConnection(sender)
+
+	result := make(chan error, 1)
+	go func() {
+		result <- session.StreamFrames(context.Background(), capture, 0)
+	}()
+	if err := receiver.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-result:
+		if err == nil || !strings.Contains(err.Error(), "video data channel closed") {
+			t.Fatalf("StreamFrames error = %v, want receiver disconnect", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("StreamFrames remained blocked after receiver disconnected")
+	}
+	_ = sender.Close()
+}
 
 func TestCodecFrameUsesEncodedRasterForAllRects(t *testing.T) {
 	sender, receiver := net.Pipe()

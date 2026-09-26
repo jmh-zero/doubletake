@@ -213,6 +213,10 @@ type MirrorSession struct {
 	closeOnce   sync.Once
 	workers     sync.WaitGroup
 	closeErr    error
+	streamDone  chan struct{}
+	streamOnce  sync.Once
+	streamErrMu sync.Mutex
+	streamErr   error
 	DataPort    int
 	videoWidth  int
 	videoHeight int
@@ -1152,6 +1156,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		DataPort:       dataPort,
 		videoCodec:     videoCodec,
 		firstFrameSent: make(chan struct{}),
+		streamDone:     make(chan struct{}),
 		noAudio:        cfg.NoAudio,
 		sessionURI:     audioURI,
 		timingConn:     timingConn,
@@ -1230,19 +1235,10 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		dbg("[SETUP] receiver did not provide audio ports, skipping audio")
 	}
 
-	// Monitor data connection for incoming data from Apple TV
+	// Monitor the data connection so a receiver-side disconnect terminates the
+	// stream even when capture is blocked waiting for its next frame.
 	if dataConn != nil {
-		go func() {
-			buf := make([]byte, 4096)
-			for {
-				n, err := dataConn.Read(buf)
-				if err != nil {
-					dbg("[DATA-READ] data conn closed: %v", err)
-					return
-				}
-				dbg("[DATA-READ] received %d bytes from Apple TV: %02x", n, buf[:min(n, 64)])
-			}
-		}()
+		go session.monitorDataConnection(dataConn)
 	}
 
 	// Keep video alive with the data-channel heartbeat and /feedback. Do not
@@ -1308,12 +1304,75 @@ func addFairPlayRootFields(request map[string]interface{}, ekey, eiv []byte, inc
 	return true
 }
 
+func (s *MirrorSession) monitorDataConnection(conn net.Conn) {
+	buf := make([]byte, 4096)
+	for {
+		n, err := conn.Read(buf)
+		if err != nil {
+			dbg("[DATA-READ] data conn closed: %v", err)
+			s.failStream(fmt.Errorf("video data channel closed: %w", err))
+			return
+		}
+		dbg("[DATA-READ] received %d bytes from receiver: %02x", n, buf[:min(n, 64)])
+	}
+}
+
+func (s *MirrorSession) failStream(err error) {
+	if err == nil || s.streamDone == nil {
+		return
+	}
+	s.streamOnce.Do(func() {
+		s.streamErrMu.Lock()
+		s.streamErr = err
+		s.streamErrMu.Unlock()
+		close(s.streamDone)
+	})
+}
+
+func (s *MirrorSession) streamFailure() error {
+	if s.streamDone == nil {
+		return nil
+	}
+	select {
+	case <-s.streamDone:
+		s.streamErrMu.Lock()
+		defer s.streamErrMu.Unlock()
+		return s.streamErr
+	default:
+		return nil
+	}
+}
+
+// stopCaptureOnStreamFailure interrupts a pending capture read when the
+// receiver closes its data channel. For daemon broadcasts, Stop removes only
+// this session's sink; a directly owned capture is stopped with the dead
+// session.
+func (s *MirrorSession) stopCaptureOnStreamFailure(capture *ScreenCapture) func() {
+	if s.streamDone == nil || capture == nil {
+		return func() {}
+	}
+	watchDone := make(chan struct{})
+	go func() {
+		select {
+		case <-s.streamDone:
+			capture.Stop()
+		case <-watchDone:
+		}
+	}()
+	return func() { close(watchDone) }
+}
+
 // StreamFrames reads H.264 frames from the capture pipeline and sends them to the Apple TV.
 // Protocol (from UxPlay/raop_rtp_mirror.c):
 //   - SPS+PPS: sent as unencrypted codec frame (header[4]=0x01) in avcC format
 //   - IDR VCL: sent encrypted, header[4]=0x00 header[5]=0x00, AVCC payload
 //   - non-IDR VCL: sent encrypted, header[4]=0x00 header[5]=0x00, AVCC payload
 func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture, startDelay time.Duration) error {
+	stopWatching := s.stopCaptureOnStreamFailure(capture)
+	defer stopWatching()
+	if err := s.streamFailure(); err != nil {
+		return err
+	}
 	if normalizeVideoCodec(s.videoCodec) == VideoCodecHEVC {
 		return s.streamHEVCFrames(ctx, capture, startDelay)
 	}
@@ -1322,6 +1381,8 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-s.streamDone:
+			return s.streamFailure()
 		case <-time.After(startDelay):
 			dbg("[STREAM] delay complete, starting frame send")
 		}
@@ -1536,6 +1597,9 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 				}
 			}
 			if err != nil {
+				if streamErr := s.streamFailure(); streamErr != nil {
+					return streamErr
+				}
 				if err == io.EOF {
 					if ctx.Err() != nil {
 						return ctx.Err()
@@ -1556,6 +1620,9 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 
 		n, err := capture.Read(buf)
 		if err != nil {
+			if streamErr := s.streamFailure(); streamErr != nil {
+				return streamErr
+			}
 			if err == io.EOF {
 				// Flush any remaining VCL data
 				if flushErr := flushVCL(); flushErr != nil {
@@ -2178,6 +2245,7 @@ func (s *MirrorSession) dataHeartbeatLoop(ctx context.Context) {
 			s.dataMu.Unlock()
 			if err != nil {
 				dbg("[HEARTBEAT] data channel heartbeat failed: %v", err)
+				s.failStream(fmt.Errorf("video data channel heartbeat: %w", err))
 				return
 			}
 		}
