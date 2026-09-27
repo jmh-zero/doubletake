@@ -245,9 +245,7 @@ func PrepareCapture(ctx context.Context, cfg CaptureConfig) (*CapturePreparation
 		kind:              kind,
 		timestampedOutput: supportsTimestampedVideoOutput(normalizeVideoCodec(validationCfg.VideoCodec)),
 	}
-	if cfg.VideoCodec == VideoCodecAuto {
-		preparation.automaticHEVCAvail, preparation.measuredVideoLatency = automaticHEVCProfile(cfg.HWAccel, cfg.FPS)
-	} else if cfg.VideoCodec == VideoCodecHEVC {
+	if cfg.VideoCodec == VideoCodecHEVC {
 		// Forced NVENC HEVC uses the same local pipeline and benefits from the
 		// same scheduling calibration. Explicit software x265 remains a deliberate
 		// opt-in and can be tuned with the joint latency override.
@@ -317,9 +315,7 @@ func PrepareTestCapture(ctx context.Context, cfg CaptureConfig) (*CapturePrepara
 		kind:              capturePreparationTest,
 		timestampedOutput: supportsTimestampedVideoOutput(normalizeVideoCodec(validationCfg.VideoCodec)),
 	}
-	if cfg.VideoCodec == VideoCodecAuto {
-		preparation.automaticHEVCAvail, preparation.measuredVideoLatency = automaticHEVCProfile(cfg.HWAccel, cfg.FPS)
-	} else if cfg.VideoCodec == VideoCodecHEVC {
+	if cfg.VideoCodec == VideoCodecHEVC {
 		_, preparation.measuredVideoLatency = automaticHEVCProfile(cfg.HWAccel, cfg.FPS)
 	}
 	if cfg.VideoCodec == VideoCodecHEVC && !preparation.timestampedOutput {
@@ -466,9 +462,8 @@ func (p *CapturePreparation) startWithContextAndCodec(lifetime context.Context, 
 	}
 }
 
-// AutomaticHEVCAvailable reports whether preflight found the hardware encoder
-// and timestamp-preserving GStreamer elements required by the normal automatic
-// high-resolution path. Explicit HEVC may still use x265 software encoding.
+// AutomaticHEVCAvailable is retained for API compatibility. Automatic screen
+// capture uses H.264; HEVC is available only through an explicit selection.
 func (p *CapturePreparation) AutomaticHEVCAvailable() bool {
 	if p == nil {
 		return false

@@ -26,94 +26,42 @@ func TestReceiverVideoCanvasUsesMaximumOnlyForCapabilityGatedHEVC(t *testing.T) 
 	}
 }
 
-func TestAutomaticVideoSelectionRequiresReceiverMaximumAndLocalHardware(t *testing.T) {
-	highResolution := &ReceiverInfo{
-		Features: uint64(1) << featureScreenMultiCodec,
-		Displays: []DisplayInfo{{
-			WidthPixels: 1280, HeightPixels: 720,
-			WidthPixelsMax: 3840, HeightPixelsMax: 2160,
-		}},
-	}
+func TestAutomaticVideoSelectionUsesNominalH264(t *testing.T) {
 	tests := []struct {
-		name      string
-		info      *ReceiverInfo
-		localHEVC bool
-		wantCodec VideoCodec
-		wantW     int
-		wantH     int
-		wantWhy   string
+		name string
+		info *ReceiverInfo
 	}{
-		{name: "all gates", info: highResolution, localHEVC: true, wantCodec: VideoCodecHEVC, wantW: 3840, wantH: 2160, wantWhy: "feature 42"},
-		{name: "local hardware unavailable", info: highResolution, wantCodec: VideoCodecH264, wantW: 1280, wantH: 720, wantWhy: "local hardware"},
-		{name: "receiver codec capability absent", info: &ReceiverInfo{Displays: highResolution.Displays}, localHEVC: true, wantCodec: VideoCodecH264, wantW: 1280, wantH: 720, wantWhy: "feature 42"},
-		{name: "maximum is only 1080p", info: &ReceiverInfo{
+		{name: "multi-codec high resolution", info: &ReceiverInfo{
 			Features: uint64(1) << featureScreenMultiCodec,
-			Displays: []DisplayInfo{{WidthPixels: 1280, HeightPixels: 720, WidthPixelsMax: 1920, HeightPixelsMax: 1080}},
-		}, localHEVC: true, wantCodec: VideoCodecH264, wantW: 1280, wantH: 720, wantWhy: "does not exceed 1080p"},
+			Displays: []DisplayInfo{{WidthPixels: 1280, HeightPixels: 720, WidthPixelsMax: 3840, HeightPixelsMax: 2160}},
+		}},
+		{name: "legacy receiver", info: &ReceiverInfo{
+			Displays: []DisplayInfo{{WidthPixels: 1280, HeightPixels: 720}},
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			selection, err := test.info.selectVideo(VideoCodecAuto, test.localHEVC)
+			selection, err := test.info.selectVideo(VideoCodecAuto, true)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if selection.codec != test.wantCodec || selection.width != test.wantW || selection.height != test.wantH {
-				t.Fatalf("selection = %s %dx%d, want %s %dx%d", selection.codec, selection.width, selection.height, test.wantCodec, test.wantW, test.wantH)
+			if selection.codec != VideoCodecH264 || selection.width != 1280 || selection.height != 720 {
+				t.Fatalf("selection = %s %dx%d, want H.264 1280x720", selection.codec, selection.width, selection.height)
 			}
-			if !strings.Contains(selection.reason, test.wantWhy) {
-				t.Fatalf("reason = %q, want substring %q", selection.reason, test.wantWhy)
+			if !strings.Contains(selection.reason, "compatibility") {
+				t.Fatalf("reason = %q, want compatibility reason", selection.reason)
 			}
 		})
 	}
 }
 
-func TestAutomaticVideoSelectionHonorsAdvertisedSampleEntries(t *testing.T) {
-	info := &ReceiverInfo{
-		Features: uint64(1) << featureScreenMultiCodec,
-		Displays: []DisplayInfo{{
-			WidthPixels: 1920, HeightPixels: 1080,
-			WidthPixelsMax: 3840, HeightPixelsMax: 2160,
-			HDRInfo: DisplayHDRInfo{
-				HDRMode:      "SDR",
-				CodecStrings: []string{"hev1.01.51", "avc1.64002a"},
-			},
-		}},
-	}
-	selection, err := info.selectVideo(VideoCodecAuto, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if selection.codec != VideoCodecH264 || selection.width != 1920 || selection.height != 1080 {
-		t.Fatalf("selection = %s %dx%d, want H.264 1920x1080", selection.codec, selection.width, selection.height)
-	}
-	if !strings.Contains(selection.reason, "omits hvc1") {
-		t.Fatalf("reason = %q, want hvc1 capability reason", selection.reason)
-	}
-
-	info.Displays[0].HDRInfo.CodecStrings[0] = "hvc1.1.6.L153"
-	selection, err = info.selectVideo(VideoCodecAuto, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if selection.codec != VideoCodecHEVC || selection.width != 3840 || selection.height != 2160 {
-		t.Fatalf("hvc1 selection = %s %dx%d, want HEVC 3840x2160", selection.codec, selection.width, selection.height)
-	}
-}
-
-func TestAutomaticVideoSelectionCapsMaximumPreservingAspect(t *testing.T) {
+func TestExplicitHEVCSelectionCapsMaximumPreservingAspect(t *testing.T) {
 	info := &ReceiverInfo{
 		Features: uint64(1) << featureScreenMultiCodec,
 		Displays: []DisplayInfo{{
 			WidthPixels: 1920, HeightPixels: 1080,
 			WidthPixelsMax: 7680, HeightPixelsMax: 2160,
 		}},
-	}
-	selection, err := info.selectVideo(VideoCodecAuto, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if selection.codec != VideoCodecHEVC || selection.width != 3840 || selection.height != 1080 {
-		t.Fatalf("selection = %s %dx%d, want HEVC 3840x1080", selection.codec, selection.width, selection.height)
 	}
 	forced, err := info.selectVideo(VideoCodecHEVC, false)
 	if err != nil {

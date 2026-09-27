@@ -88,13 +88,9 @@ Only \fBauto\fR tries fallback encoders. An explicit method fails if its
 required GStreamer encoder is unavailable. The default is \fBauto\fR.
 .TP
 .B \-video-codec \fICODEC\fR
-Screen codec: capability-driven \fBauto\fR (default), forced \fBh264\fR, or
-forced \fBhevc\fR. Automatic HEVC requires receiver feature 42, a session-time
-maximum above 1920x1080, and the complete NVENC Main10/timestamp path;
-otherwise it uses H.264 at the nominal canvas. Forced HEVC may also use x265.
-The automatic hardware preflight measures sustained 4K capture-to-access-unit
-latency and increases both presentation leads by the same bounded margin when
-needed, preserving their relative synchronization.
+Screen codec: compatible H.264 \fBauto\fR (default), forced \fBh264\fR, or
+forced \fBhevc\fR. Automatic mode uses H.264 at the receiver's nominal canvas.
+Forced HEVC uses the receiver's maximum canvas and may also use x265.
 Main10 output does not fabricate HDR metadata for an SDR capture source.
 .TP
 .B \-debug

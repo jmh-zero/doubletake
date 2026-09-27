@@ -397,7 +397,7 @@ func TestSetupMirrorPreparesVideoFromSessionDisplayInfo(t *testing.T) {
 	}
 }
 
-func TestSetupMirrorAutomaticallySelectsHEVCFromSessionDisplayInfo(t *testing.T) {
+func TestSetupMirrorAutomaticallySelectsNominalH264FromSessionDisplayInfo(t *testing.T) {
 	SetTargetLatency(0)
 	t.Cleanup(func() { SetTargetLatency(0) })
 	_, client, ctx := newReceiverServerTestPair(t, ReceiverConfig{Profile: ReceiverProfileModern})
@@ -418,8 +418,8 @@ func TestSetupMirrorAutomaticallySelectsHEVCFromSessionDisplayInfo(t *testing.T)
 		MeasuredVideoLatency:   150 * time.Millisecond,
 	}, func(width, height int, codec VideoCodec) error {
 		callbackCount++
-		if codec != VideoCodecHEVC || width != 3840 || height != 2160 {
-			return fmt.Errorf("automatic selection = %s %dx%d, want HEVC 3840x2160", codec, width, height)
+		if codec != VideoCodecH264 || width != 1920 || height != 1080 {
+			return fmt.Errorf("automatic selection = %s %dx%d, want H.264 1920x1080", codec, width, height)
 		}
 		return nil
 	})
@@ -430,18 +430,18 @@ func TestSetupMirrorAutomaticallySelectsHEVCFromSessionDisplayInfo(t *testing.T)
 	if callbackCount != 1 {
 		t.Fatalf("video preparation callbacks = %d, want 1", callbackCount)
 	}
-	if session.videoCodec != VideoCodecHEVC {
-		t.Fatalf("session codec = %s, want HEVC", session.videoCodec)
+	if session.videoCodec != VideoCodecH264 {
+		t.Fatalf("session codec = %s, want H.264", session.videoCodec)
 	}
-	if session.timestampBias != 150*time.Millisecond {
-		t.Fatalf("session video lead = %v, want calibrated 150ms", session.timestampBias)
+	if session.timestampBias != defaultVideoLatencyNormal {
+		t.Fatalf("session video lead = %v, want %v", session.timestampBias, defaultVideoLatencyNormal)
 	}
-	if session.audioStream == nil || session.audioStream.latencySamples != samplesFor44k1(160*time.Millisecond) {
-		t.Fatalf("session audio lead = %#v, want calibrated 160ms (%d samples)", session.audioStream, samplesFor44k1(160*time.Millisecond))
+	if session.audioStream == nil || session.audioStream.latencySamples != samplesFor44k1(defaultAudioLatencyNormal) {
+		t.Fatalf("session audio lead = %#v, want %d samples", session.audioStream, samplesFor44k1(defaultAudioLatencyNormal))
 	}
 }
 
-func TestAutomaticVideoPreparationFallsBackToNominalH264(t *testing.T) {
+func TestAutomaticVideoPreparationStartsNominalH264(t *testing.T) {
 	SetTargetLatency(0)
 	t.Cleanup(func() { SetTargetLatency(0) })
 	server, client, ctx := newReceiverServerTestPair(t, ReceiverConfig{Profile: ReceiverProfileModern})
@@ -463,9 +463,6 @@ func TestAutomaticVideoPreparationFallsBackToNominalH264(t *testing.T) {
 		MeasuredVideoLatency:   160 * time.Millisecond,
 	}, func(width, height int, codec VideoCodec) (VideoPreparationResult, error) {
 		attempts = append(attempts, preparation{codec: codec, width: width, height: height})
-		if codec == VideoCodecHEVC {
-			return VideoPreparationResult{}, fmt.Errorf("%w: live encoder missed its deadline", ErrAutomaticVideoCodecUnavailable)
-		}
 		return VideoPreparationResult{}, nil
 	})
 	if err != nil {
@@ -473,7 +470,6 @@ func TestAutomaticVideoPreparationFallsBackToNominalH264(t *testing.T) {
 	}
 	defer session.Close()
 	want := []preparation{
-		{codec: VideoCodecHEVC, width: 3840, height: 2160},
 		{codec: VideoCodecH264, width: 1920, height: 1080},
 	}
 	if !reflect.DeepEqual(attempts, want) {
@@ -561,7 +557,7 @@ func TestLiveHEVCCaptureLeadIsCommittedBeforeMediaSetup(t *testing.T) {
 				t.Fatalf("FairPlay setup: %v", err)
 			}
 			session, err := client.SetupMirrorWithCalibratedVideoPreparation(ctx, StreamConfig{
-				VideoCodec:             VideoCodecAuto,
+				VideoCodec:             VideoCodecHEVC,
 				AutomaticHEVCAvailable: true,
 				MeasuredVideoLatency:   test.preflight,
 			}, func(_, _ int, codec VideoCodec) (VideoPreparationResult, error) {
@@ -599,7 +595,7 @@ func TestMeasuredHEVCLatencyIsScopedAndExplicitOverrideWins(t *testing.T) {
 			wantCodec: VideoCodecH264, wantVideoLead: 75 * time.Millisecond, wantAudioLead: 85 * time.Millisecond,
 		},
 		{
-			name: "joint override wins", requested: VideoCodecAuto, override: 100 * time.Millisecond,
+			name: "joint override wins", requested: VideoCodecHEVC, override: 100 * time.Millisecond,
 			wantCodec: VideoCodecHEVC, wantVideoLead: 100 * time.Millisecond, wantAudioLead: 100 * time.Millisecond,
 		},
 	}

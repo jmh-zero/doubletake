@@ -1322,8 +1322,8 @@ func (c *AirPlayClient) readDecryptedBytes(n int) ([]byte, error) {
 type StreamConfig struct {
 	FPS                    int
 	Bitrate                int           // Video bitrate in kbps
-	VideoCodec             VideoCodec    // empty/h264, auto, or capability-gated hevc
-	AutomaticHEVCAvailable bool          // capture preflight found the hardware HEVC-4K path
+	VideoCodec             VideoCodec    // empty/h264, auto (H.264), or explicitly requested hevc
+	AutomaticHEVCAvailable bool          // retained for programmatic compatibility
 	MeasuredVideoLatency   time.Duration // measured minimum lead for the local HEVC capture path
 	NoEncrypt              bool          // Disable encryption for debugging
 	DirectKey              bool          // Use shk/shiv directly without SHA-512 derivation

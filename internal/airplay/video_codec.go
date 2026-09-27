@@ -3,7 +3,6 @@ package airplay
 import (
 	"fmt"
 	"math"
-	"strings"
 )
 
 // VideoCodec selects the compressed screen codec carried by AirPlay mirroring.
@@ -49,27 +48,6 @@ func (i *ReceiverInfo) supportsVideoCodec(codec VideoCodec) bool {
 	}
 }
 
-func (i *ReceiverInfo) supportsAutomaticHVC1() bool {
-	if i == nil || len(i.Displays) == 0 {
-		return true
-	}
-	advertised := false
-	for _, display := range i.Displays {
-		modes := append([]DisplayHDRInfo{display.HDRInfo}, display.HDRSupportedModes...)
-		for _, mode := range modes {
-			for _, codec := range mode.CodecStrings {
-				advertised = true
-				if strings.EqualFold(codec, "hvc1") || strings.HasPrefix(strings.ToLower(codec), "hvc1.") {
-					return true
-				}
-			}
-		}
-	}
-	// Older receivers do not publish codecStrings. Feature 42 remains their
-	// compatibility signal; a present list is authoritative for its display.
-	return !advertised
-}
-
 type videoSelection struct {
 	codec         VideoCodec
 	width, height int
@@ -77,10 +55,10 @@ type videoSelection struct {
 }
 
 // selectVideo chooses one concrete codec and canvas from the final receiver
-// snapshot. Apple's sender treats SupportsScreenMultiCodec (feature 42), a
-// maximum above 1080p, and local HEVC-4K support as independent gates. Auto
-// follows that shape; explicit codec requests remain deterministic.
+// snapshot. The interoperable screen sender path uses AVC at the receiver's
+// nominal canvas. HEVC remains an explicit diagnostic override.
 func (i *ReceiverInfo) selectVideo(requested VideoCodec, automaticHEVCAvailable bool) (videoSelection, error) {
+	_ = automaticHEVCAvailable // Retained for programmatic compatibility.
 	if requested == "" {
 		requested = VideoCodecH264
 	}
@@ -99,24 +77,8 @@ func (i *ReceiverInfo) selectVideo(requested VideoCodec, automaticHEVCAvailable 
 		}
 		return videoSelection{codec: VideoCodecHEVC, width: width, height: height, reason: "explicit HEVC"}, nil
 	case VideoCodecAuto:
-		if !automaticHEVCAvailable {
-			width, height := i.MirrorSize()
-			return videoSelection{codec: VideoCodecH264, width: width, height: height, reason: "local hardware HEVC path unavailable"}, nil
-		}
-		if !i.supportsVideoCodec(VideoCodecHEVC) {
-			width, height := i.MirrorSize()
-			return videoSelection{codec: VideoCodecH264, width: width, height: height, reason: "receiver lacks feature 42"}, nil
-		}
-		if !i.supportsAutomaticHVC1() {
-			width, height := i.MirrorSize()
-			return videoSelection{codec: VideoCodecH264, width: width, height: height, reason: "receiver codec list omits hvc1"}, nil
-		}
-		width, height, ok := i.highResolutionVideoCanvas()
-		if !ok {
-			width, height = i.MirrorSize()
-			return videoSelection{codec: VideoCodecH264, width: width, height: height, reason: "receiver maximum does not exceed 1080p"}, nil
-		}
-		return videoSelection{codec: VideoCodecHEVC, width: width, height: height, reason: "feature 42, high-resolution maximum, and local hardware HEVC"}, nil
+		width, height := i.MirrorSize()
+		return videoSelection{codec: VideoCodecH264, width: width, height: height, reason: "automatic compatibility path"}, nil
 	default:
 		panic("validated video codec has no selection policy")
 	}
