@@ -223,13 +223,13 @@ func TestSetupMirrorDigestRetryReusesStartedVideoPreparation(t *testing.T) {
 				return
 			}
 
-			record, err := readRTSPTestRequest(reader)
+			streamSetup, err := readRTSPTestRequest(reader)
 			if err != nil {
-				serverErr <- fmt.Errorf("read RECORD %d: %w", attempt+1, err)
+				serverErr <- fmt.Errorf("read stream SETUP %d: %w", attempt+1, err)
 				return
 			}
-			if record.method != "RECORD" {
-				serverErr <- fmt.Errorf("request after control SETUP %d = %s, want RECORD", attempt+1, record.method)
+			if streamSetup.method != "SETUP" {
+				serverErr <- fmt.Errorf("request after control SETUP %d = %s, want stream SETUP", attempt+1, streamSetup.method)
 				return
 			}
 			if attempt == 0 {
@@ -254,13 +254,13 @@ func TestSetupMirrorDigestRetryReusesStartedVideoPreparation(t *testing.T) {
 				}
 				continue
 			}
-			if !strings.HasPrefix(record.headers["authorization"], "Digest ") {
-				serverErr <- fmt.Errorf("retried RECORD omitted cached Digest authorization")
+			if !strings.HasPrefix(streamSetup.headers["authorization"], "Digest ") {
+				serverErr <- fmt.Errorf("retried stream SETUP omitted cached Digest authorization")
 				return
 			}
 			// Stop after proving that the second negotiation crossed the video
 			// preparation boundary. A full media fixture is unnecessary here.
-			if err := writeRTSPTestResponse(conn, 500, nil, nil); err != nil {
+			if err := writeRTSPTestResponse(conn, 503, nil, nil); err != nil {
 				serverErr <- err
 				return
 			}
@@ -302,8 +302,8 @@ func TestSetupMirrorDigestRetryReusesStartedVideoPreparation(t *testing.T) {
 		t.Fatal("second setup unexpectedly completed past the scripted stop")
 	} else {
 		var statusErr *HTTPStatusError
-		if !errors.As(err, &statusErr) || statusErr.StatusCode != 500 {
-			t.Fatalf("second setup error = %v, want scripted HTTP 500", err)
+		if !errors.As(err, &statusErr) || statusErr.StatusCode != 503 {
+			t.Fatalf("second setup error = %v, want scripted HTTP 503", err)
 		}
 	}
 	if callbackCalls != 2 {
@@ -1030,6 +1030,14 @@ func TestSetupMirrorWithAudioSetsReceiverVolume(t *testing.T) {
 	}
 }
 
+func TestSetupMirrorControlFirstRecordsAfterStreamSetup(t *testing.T) {
+	testSetupMirrorAudioSessionNegotiation(t, audioSessionCase{
+		skipRecord:   false,
+		noAudio:      true,
+		controlFirst: true,
+	})
+}
+
 // A no-audio session must not be able to write the receiver's volume through
 // the daemon's mute control either: unmuting sends 0 dB, which is full scale.
 func TestSetAudioMutedRefusesWhenSessionHasNoAudio(t *testing.T) {
@@ -1049,8 +1057,9 @@ func TestSetAudioMutedRefusesWhenSessionHasNoAudio(t *testing.T) {
 }
 
 type audioSessionCase struct {
-	skipRecord bool
-	noAudio    bool
+	skipRecord   bool
+	noAudio      bool
+	controlFirst bool
 }
 
 func testSetupMirrorAudioSessionNegotiation(t *testing.T, test audioSessionCase) {
@@ -1172,10 +1181,50 @@ func testSetupMirrorAudioSessionNegotiation(t *testing.T, test audioSessionCase)
 						serverErr <- fmt.Errorf("first control SETUP omitted combined GetInfo request")
 						return
 					}
-					// Explicitly reject the artifact-preferred control-first shape so
-					// this test also exercises the one-way media-first negotiation.
-					if err := writeRTSPTestResponse(conn, 400, nil, nil); err != nil {
+					if !test.controlFirst {
+						// Explicitly reject the control-first shape so this case also
+						// exercises the one-way media-first negotiation.
+						if err := writeRTSPTestResponse(conn, 400, nil, nil); err != nil {
+							serverErr <- err
+							return
+						}
+						continue
+					}
+					timingPort = plistInt(setup["timingPort"])
+					if timingPort <= 0 {
+						serverErr <- fmt.Errorf("expected positive timingPort in control setup, got %d", timingPort)
+						return
+					}
+					if err := probeNTPTiming(timingPort); err != nil {
 						serverErr <- err
+						return
+					}
+					respBody, err := plist.Marshal(map[string]interface{}{
+						"eventPort":  int64(eventListener.Addr().(*net.TCPAddr).Port),
+						"skipRecord": skipRecord,
+						"info": map[string]interface{}{
+							"displays": []interface{}{map[string]interface{}{
+								"widthPixels":  int64(1920),
+								"heightPixels": int64(1080),
+							}},
+						},
+					}, plist.BinaryFormat)
+					if err != nil {
+						serverErr <- fmt.Errorf("marshal control response: %w", err)
+						return
+					}
+					if err := writeRTSPTestResponse(conn, 200, nil, respBody); err != nil {
+						serverErr <- err
+						return
+					}
+					select {
+					case err := <-eventResult:
+						if err != nil {
+							serverErr <- err
+							return
+						}
+					case <-time.After(time.Second):
+						serverErr <- fmt.Errorf("event command was not acknowledged before audio SETUP")
 						return
 					}
 					continue
@@ -1189,26 +1238,33 @@ func testSetupMirrorAudioSessionNegotiation(t *testing.T, test audioSessionCase)
 				var respBody []byte
 				switch streamType {
 				case 96:
-					if got, _ := setup["sourceVersion"].(string); got != legacyAirPlaySourceVersion {
-						serverErr <- fmt.Errorf("audio sourceVersion = %q, want %q", got, legacyAirPlaySourceVersion)
-						return
-					}
-					if got, _ := setup["timingProtocol"].(string); got != timingProtocolNTP {
-						serverErr <- fmt.Errorf("expected timingProtocol NTP in audio setup, got %q", got)
-						return
-					}
-					if mirroring, _ := setup["isScreenMirroringSession"].(bool); !mirroring {
-						serverErr <- fmt.Errorf("expected isScreenMirroringSession in initial setup")
-						return
-					}
-					timingPort = plistInt(setup["timingPort"])
-					if timingPort <= 0 {
-						serverErr <- fmt.Errorf("expected positive timingPort in audio setup, got %d", timingPort)
-						return
-					}
-					if err := probeNTPTiming(timingPort); err != nil {
-						serverErr <- err
-						return
+					if test.controlFirst {
+						if len(setup) != 1 {
+							serverErr <- fmt.Errorf("control-first audio SETUP keys = %#v, want only streams", setup)
+							return
+						}
+					} else {
+						if got, _ := setup["sourceVersion"].(string); got != legacyAirPlaySourceVersion {
+							serverErr <- fmt.Errorf("audio sourceVersion = %q, want %q", got, legacyAirPlaySourceVersion)
+							return
+						}
+						if got, _ := setup["timingProtocol"].(string); got != timingProtocolNTP {
+							serverErr <- fmt.Errorf("expected timingProtocol NTP in audio setup, got %q", got)
+							return
+						}
+						if mirroring, _ := setup["isScreenMirroringSession"].(bool); !mirroring {
+							serverErr <- fmt.Errorf("expected isScreenMirroringSession in initial setup")
+							return
+						}
+						timingPort = plistInt(setup["timingPort"])
+						if timingPort <= 0 {
+							serverErr <- fmt.Errorf("expected positive timingPort in audio setup, got %d", timingPort)
+							return
+						}
+						if err := probeNTPTiming(timingPort); err != nil {
+							serverErr <- err
+							return
+						}
 					}
 					if got := plistInt(stream["controlPort"]); got <= 0 {
 						serverErr <- fmt.Errorf("expected positive controlPort in audio setup, got %d", got)
@@ -1222,9 +1278,7 @@ func testSetupMirrorAudioSessionNegotiation(t *testing.T, test audioSessionCase)
 						serverErr <- fmt.Errorf("audio latencyMax = %d, want %d", got, want)
 						return
 					}
-					respBody, err = plist.Marshal(map[string]interface{}{
-						"eventPort":  int64(eventListener.Addr().(*net.TCPAddr).Port),
-						"skipRecord": skipRecord,
+					audioResponse := map[string]interface{}{
 						"streams": []interface{}{
 							map[string]interface{}{
 								"type":        int64(96),
@@ -1232,20 +1286,32 @@ func testSetupMirrorAudioSessionNegotiation(t *testing.T, test audioSessionCase)
 								"controlPort": int64(6101),
 							},
 						},
-					}, plist.BinaryFormat)
-					waitForEvent = true
+					}
+					if !test.controlFirst {
+						audioResponse["eventPort"] = int64(eventListener.Addr().(*net.TCPAddr).Port)
+						audioResponse["skipRecord"] = skipRecord
+						waitForEvent = true
+					}
+					respBody, err = plist.Marshal(audioResponse, plist.BinaryFormat)
 				case 110:
 					if got := plistInt(stream["latencyMs"]); got != int(defaultVideoLatencyNormal/time.Millisecond) {
 						serverErr <- fmt.Errorf("video latencyMs = %d, want %d", got, defaultVideoLatencyNormal/time.Millisecond)
 						return
 					}
-					if got, _ := setup["timingProtocol"].(string); got != timingProtocolNTP {
-						serverErr <- fmt.Errorf("expected timingProtocol NTP in video setup, got %q", got)
-						return
-					}
-					if got := plistInt(setup["timingPort"]); got != timingPort {
-						serverErr <- fmt.Errorf("video timingPort = %d, want audio timingPort %d", got, timingPort)
-						return
+					if test.controlFirst {
+						if len(setup) != 1 {
+							serverErr <- fmt.Errorf("control-first video SETUP keys = %#v, want only streams", setup)
+							return
+						}
+					} else {
+						if got, _ := setup["timingProtocol"].(string); got != timingProtocolNTP {
+							serverErr <- fmt.Errorf("expected timingProtocol NTP in video setup, got %q", got)
+							return
+						}
+						if got := plistInt(setup["timingPort"]); got != timingPort {
+							serverErr <- fmt.Errorf("video timingPort = %d, want audio timingPort %d", got, timingPort)
+							return
+						}
 					}
 					respBody, err = plist.Marshal(map[string]interface{}{
 						"streams": []interface{}{

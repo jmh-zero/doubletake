@@ -122,22 +122,23 @@ and video when the advertised audio format is unavailable.
 
 ## Firewall
 
-doubletake reserves three consecutive UDP ports for timing and audio traffic.
-Receiver-initiated NTP sessions probe the timing port during SETUP; PTP and
-sender-initiated NTP sessions do not require that inbound timing traffic. The
-event and video data channels are outbound TCP connections from doubletake to
-ports returned by the receiver, so they do not require inbound firewall rules.
-NTP and PTP use the same presentation policy; the timing protocol only changes
-how timestamps are represented. In automatic mode, an ordinary connection uses
-the AirPlay defaults observed in the checked-in sender artifacts: 75 ms for
-video and 85 ms for screen audio. When the automatic high-resolution HEVC
-preflight measures a longer local capture-to-access-unit path, doubletake adds
-the same scheduling margin to both values. This keeps Apple's 10 ms relationship
-while ensuring video reaches the receiver before its presentation deadline.
+doubletake binds three consecutive local UDP ports for each stream:
 
-By default the OS assigns ephemeral ports. Use `-port-range MIN-MAX` to confine
-the UDP ports to a small window you can open in your firewall (needs at least 3
-ports):
+- `N`: timing. A receiver-initiated NTP session probes this port during SETUP.
+- `N+1`: audio control and receiver retransmission requests.
+- `N+2`: outgoing audio data.
+
+PTP and sender-initiated NTP sessions do not require a new inbound timing
+connection, but the receiver can still send audio retransmission requests to
+the control port. The event and video data channels are outbound TCP
+connections from doubletake to ports returned by the receiver. Doubletake does
+not listen for inbound TCP connections.
+
+No router port forwarding or Internet exposure is needed. If the host firewall
+allows local-network traffic, no firewall configuration is necessary. With a
+default-deny host firewall, use `-port-range MIN-MAX` to replace unpredictable
+ephemeral UDP ports with a range you can allow from the receiver. The range
+must contain at least three ports:
 
 ```sh
 doubletake -target 192.168.1.77 -port-range 60000-60010
@@ -146,14 +147,23 @@ doubletake -target 192.168.1.77 -port-range 60000-60010
 Daemon mode uses the same range for every managed stream. Reserve at least
 three available ports per receiver that may stream simultaneously.
 
-Then with UFW:
+For example, restrict a UFW rule to the receiver's address:
 
 ```sh
-sudo ufw allow from any proto udp to any port 60000:60010
+sudo ufw allow from 192.168.1.77 proto udp to any port 60000:60010
 ```
 
-For nftables/firewalld, add an equivalent rule allowing inbound UDP from the
-receiver's address on the chosen range.
+Add a rule for each receiver, or use the trusted LAN subnet as the source. For
+nftables/firewalld, add an equivalent inbound UDP rule for the selected source
+and range.
+
+NTP and PTP use the same presentation policy; the timing protocol only changes
+how timestamps are represented. In automatic mode, an ordinary connection uses
+a 75 ms video lead and an 85 ms screen-audio lead. When the automatic
+high-resolution HEVC
+preflight measures a longer local capture-to-access-unit path, doubletake adds
+the same scheduling margin to both values. This keeps the 10 ms relationship
+while ensuring video reaches the receiver before its presentation deadline.
 
 ## Password-protected receivers
 
@@ -258,7 +268,7 @@ doubletake-ctl disconnect
 | `-target` | | Apple TV IP (skip mDNS discovery) |
 | `-port` | 7000 | AirPlay port |
 | `-code` | | Pairing PIN shown on the receiver, or its configured password when "Require Password" is enabled (see [Password-protected receivers](#password-protected-receivers)); prefer `$DOUBLETAKE_CODE` |
-| `-port-range` | | Local UDP port range for timing/audio (at least 3 ports) |
+| `-port-range` | | Local UDP range for timing/audio and receiver control traffic (at least 3 ports) |
 | `-cred-backend` | `file` | Credential backend (`file` or `keyring`) |
 | `-creds` | `~/.config/doubletake/credentials.json` | Credentials file path |
 | `-pair` | false | Force new pairing |

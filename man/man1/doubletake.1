@@ -54,7 +54,9 @@ does not request an on-screen PIN in password mode.
 .B \-port-range \fIMIN-MAX\fR
 Confine local timing and audio UDP sockets to a range of at least three ports,
 including streams started in daemon mode. Reserve three available ports per
-simultaneous receiver.
+simultaneous receiver. See
+.B FIREWALL
+below.
 .TP
 .B \-pair
 Force new pairing even if credentials exist
@@ -145,6 +147,29 @@ submittable with the compatible
 command when exactly one receiver is waiting. For concurrent prompts, use
 .B doubletake-ctl connect \fITARGET\fR \fIPIN-OR-PASSWORD\fR
 to submit a credential to a specific receiver.
+.SH FIREWALL
+For each stream, doubletake binds three consecutive local UDP ports: timing at
+\fIN\fR, audio control and receiver retransmission requests at \fIN+1\fR, and
+outgoing audio data at \fIN+2\fR. Receiver-initiated NTP probes the timing port.
+PTP and sender-initiated NTP do not require a new inbound timing connection,
+but the receiver can still send audio retransmission requests to the control
+port.
+.PP
+The event and video data channels are outbound TCP connections to ports returned
+by the receiver. Doubletake does not require an inbound TCP firewall rule.
+Router port forwarding and Internet exposure are not required.
+.PP
+The operating system selects ephemeral UDP ports unless
+.B \-port-range
+is set. On a default-deny host firewall, select a range and allow inbound UDP
+to that range from each receiver or from the trusted LAN subnet. For example:
+.PP
+.B doubletake \-target 192.168.1.77 \-port-range 60000-60010
+.PP
+.B sudo ufw allow from 192.168.1.77 proto udp to any port 60000:60010
+.PP
+Daemon mode shares the configured range among its streams. Reserve at least
+three available ports for every simultaneous receiver.
 .SH REQUIREMENTS
 .IP \(bu 2
 Go 1.23 or later

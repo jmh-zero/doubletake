@@ -551,7 +551,6 @@ type receiverSessionState uint8
 const (
 	receiverSessionInitial receiverSessionState = iota
 	receiverSessionControlPrepared
-	receiverSessionRecorded
 	receiverSessionAudioPrepared
 	receiverSessionVideoPrepared
 	receiverSessionReady
@@ -1179,10 +1178,10 @@ func (c *receiverConnection) nextSetupState(kind receiverSetupKind) (receiverSes
 		switch {
 		case c.sessionState == receiverSessionInitial && kind == receiverSetupControl:
 			return receiverSessionControlPrepared, nil
-		case c.sessionState == receiverSessionRecorded && kind == receiverSetupAudio:
+		case c.sessionState == receiverSessionControlPrepared && kind == receiverSetupAudio:
 			return receiverSessionAudioPrepared, nil
 		case c.sessionState == receiverSessionAudioPrepared && kind == receiverSetupVideo:
-			return receiverSessionReady, nil
+			return receiverSessionVideoPrepared, nil
 		}
 	} else {
 		switch {
@@ -1196,17 +1195,10 @@ func (c *receiverConnection) nextSetupState(kind receiverSetupKind) (receiverSes
 }
 
 func (c *receiverConnection) handleRecord() receiverResponse {
-	if c.server.profile.setupOrder == receiverSetupSessionFirst {
-		if c.sessionState != receiverSessionControlPrepared {
-			return c.invalidSessionState("RECORD")
-		}
-		c.sessionState = receiverSessionRecorded
-	} else {
-		if c.sessionState != receiverSessionVideoPrepared {
-			return c.invalidSessionState("RECORD")
-		}
-		c.sessionState = receiverSessionReady
+	if c.sessionState != receiverSessionVideoPrepared {
+		return c.invalidSessionState("RECORD")
 	}
+	c.sessionState = receiverSessionReady
 	return receiverResponse{status: 200, headers: map[string]string{"Audio-Latency": "22050"}}
 }
 
