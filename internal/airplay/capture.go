@@ -896,6 +896,16 @@ func lowLatencyVideoQueueStage() gstStage {
 	}
 }
 
+func waylandFramePacingStage() gstStage {
+	// The screen sender drives capture at its configured display cadence and
+	// converts each resulting sample timestamp to network time. PipeWire's
+	// max-framerate is only an upper bound, so retain videorate's normal duplicate
+	// behavior to produce that same steady cadence when compositor delivery is
+	// early, late, or briefly idle. This stage follows the ownership boundary in
+	// every pipeline, so a duplicated frame never pins a portal-owned buffer.
+	return gstStage{"videorate", "skip-to-first=true"}
+}
+
 func appendGstStage(args []string, stage gstStage) []string {
 	if len(stage) == 0 {
 		return args
@@ -992,7 +1002,7 @@ func buildVAWaylandVideoPipeline(fd int, nodeID uint32, fps int, encoder encoder
 		caps += fmt.Sprintf(",width=%d,height=%d,pixel-aspect-ratio=1/1", maxWidth&^1, maxHeight&^1)
 	}
 	args = appendGstStage(args, gstStage{caps})
-	args = appendGstStage(args, gstStage{"videorate", "drop-only=true", "skip-to-first=true"})
+	args = appendGstStage(args, waylandFramePacingStage())
 	args = appendGstStage(args, gstStage{caps + fmt.Sprintf(",framerate=%d/1", fps)})
 	args = appendGstStage(args, lowLatencyVideoQueueStage())
 	return appendGstVideoEncoding(args, encoder, timestampedOutput)
@@ -1090,7 +1100,7 @@ func buildSystemWaylandVideoPipeline(fd int, nodeID uint32, fps int, encoder enc
 	}
 	args = appendGstStage(args, gstStage{"videoconvert"})
 	args = appendGstStage(args, gstStage{fmt.Sprintf("video/x-raw,format=%s", encoder.rawFormat)})
-	args = appendGstStage(args, gstStage{"videorate", "drop-only=true", "skip-to-first=true"})
+	args = appendGstStage(args, waylandFramePacingStage())
 	args = appendGstStage(args, frameRateStage(fps))
 	args = appendGstStage(args, lowLatencyVideoQueueStage())
 	if encoder.needsVulkan {
@@ -1120,7 +1130,7 @@ func buildVAPostprocPlainRawWaylandVideoPipeline(fd int, nodeID uint32, fps int,
 		args = appendGstStage(args, gstStage{"videoconvert"})
 		args = appendGstStage(args, gstStage{fmt.Sprintf("video/x-raw,format=%s", encoder.rawFormat)})
 	}
-	args = appendGstStage(args, gstStage{"videorate", "drop-only=true", "skip-to-first=true"})
+	args = appendGstStage(args, waylandFramePacingStage())
 	args = appendGstStage(args, frameRateStage(fps))
 	args = appendGstStage(args, lowLatencyVideoQueueStage())
 	if encoder.needsVulkan {
