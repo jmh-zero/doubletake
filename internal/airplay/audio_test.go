@@ -82,6 +82,12 @@ func TestStreamAudioUsesNegotiatedRecentFrameRedundancy(t *testing.T) {
 				if original := originals[seq]; original != nil && !bytes.Equal(packet, original) {
 					t.Fatalf("redundant sequence %d differs from its original datagram", seq)
 				}
+				if originals[seq] == nil {
+					plain := decodeAudioPacketPayloadForTest(t, stream, security, packet)
+					if len(plain) != 1416 {
+						t.Fatalf("legacy sequence %d ALAC length = %d, want 1416-byte escape frame", seq, len(plain))
+					}
+				}
 				originals[seq] = packet
 				if !bytes.Equal(stream.audioPacketForRetransmit(seq), packet) {
 					t.Fatalf("requested retransmit history differs for sequence %d", seq)
@@ -375,7 +381,7 @@ func streamAudioPacketsForCodecTest(t *testing.T, security string, frames audioP
 	}
 	capture := &AudioCapture{
 		pcmPipe: io.NopCloser(bytes.NewReader(pcm)), pcmFrames: frames,
-		waitCh: make(chan struct{}), codec: codec,
+		waitCh: make(chan struct{}), codec: codec, compactALAC: rfc2198,
 	}
 	if codec == AudioCodecAACELD {
 		capture.eld, err = newELDEncoder()

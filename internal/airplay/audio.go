@@ -114,17 +114,18 @@ func randomRTPTime(reader io.Reader) (uint32, error) {
 
 // AudioCapture manages audio capture via GStreamer and local ALAC encoding.
 type AudioCapture struct {
-	gstCmd    *exec.Cmd
-	pcmPipe   io.ReadCloser
-	pcmFrames audioPCMFrameReader
-	cancel    context.CancelFunc
-	waitCh    chan struct{}
-	waitErr   error
-	stopped   bool
-	codec     AudioCodec
-	alac      *alacEncoder
-	eldMu     sync.Mutex
-	eld       *eldEncoder
+	gstCmd      *exec.Cmd
+	pcmPipe     io.ReadCloser
+	pcmFrames   audioPCMFrameReader
+	cancel      context.CancelFunc
+	waitCh      chan struct{}
+	waitErr     error
+	stopped     bool
+	codec       AudioCodec
+	alac        *alacEncoder
+	compactALAC bool
+	eldMu       sync.Mutex
+	eld         *eldEncoder
 }
 
 var audioTimestampFallbackWarning sync.Once
@@ -185,7 +186,7 @@ func audioCapturePipelineArgs(srcArgs []string, codec AudioCodec, timestamped bo
 // StartAudioCapture launches a pipeline that captures system audio (monitor source)
 // and feeds raw PCM into the encoder negotiated by SETUP. ALAC is built in;
 // AAC-ELD is available in builds made with -tags fdk_aac and libfdk-aac.
-func StartAudioCapture(ctx context.Context, testTone bool, codec AudioCodec) (*AudioCapture, error) {
+func StartAudioCapture(ctx context.Context, testTone bool, codec AudioCodec, compactALAC bool) (*AudioCapture, error) {
 	captureCtx, cancel := context.WithCancel(ctx)
 	if codec != AudioCodecALAC && codec != AudioCodecAACELD {
 		cancel()
@@ -216,12 +217,18 @@ func StartAudioCapture(ctx context.Context, testTone bool, codec AudioCodec) (*A
 	}
 
 	ac := &AudioCapture{
-		cancel: cancel,
-		waitCh: make(chan struct{}),
-		codec:  codec,
+		cancel:      cancel,
+		waitCh:      make(chan struct{}),
+		codec:       codec,
+		compactALAC: compactALAC,
 	}
 	if codec == AudioCodecALAC {
-		ac.alac = &alacEncoder{}
+		if compactALAC {
+			ac.alac = &alacEncoder{}
+			dbg("[AUDIO] using compact ALAC for RFC 2198 packet redundancy")
+		} else {
+			dbg("[AUDIO] using ALAC escape frames for legacy packet redundancy")
+		}
 	} else if codec == AudioCodecAACELD {
 		var err error
 		ac.eld, err = newELDEncoder()
@@ -328,6 +335,9 @@ func (ac *AudioCapture) readFramePosition(buf []byte) (int, audioPCMFramePositio
 		}
 		n, err := ac.eld.Encode(pcm, buf)
 		return n, position, err
+	}
+	if !ac.compactALAC {
+		return encodeALACVerbatim(buf, pcm, spf, channels, 16), position, nil
 	}
 	if ac.alac == nil {
 		ac.alac = &alacEncoder{}
@@ -563,6 +573,15 @@ func (s *MirrorSession) AudioCodec() AudioCodec {
 		return AudioCodecALAC
 	}
 	return AudioCodec(s.audioStream.ct)
+}
+
+// UsesCompactALAC reports whether this session negotiated RFC 2198 compound
+// redundancy. Its 10-bit block length requires encoded ALAC frames below 1024
+// bytes. Legacy packet redundancy carries each ALAC frame independently and
+// uses the broadly supported escape representation instead.
+func (s *MirrorSession) UsesCompactALAC() bool {
+	return s != nil && s.audioStream != nil && s.audioStream.rfc2198 &&
+		AudioCodec(s.audioStream.ct) == AudioCodecALAC
 }
 
 // setupAudioStream creates the audio RTP stream state.
