@@ -3,6 +3,7 @@ package airplay
 import (
 	"fmt"
 	"math"
+	"strings"
 )
 
 // VideoCodec selects the compressed screen codec carried by AirPlay mirroring.
@@ -48,6 +49,27 @@ func (i *ReceiverInfo) supportsVideoCodec(codec VideoCodec) bool {
 	}
 }
 
+func (i *ReceiverInfo) supportsAutomaticHVC1() bool {
+	if i == nil || len(i.Displays) == 0 {
+		return true
+	}
+	advertised := false
+	for _, display := range i.Displays {
+		modes := append([]DisplayHDRInfo{display.HDRInfo}, display.HDRSupportedModes...)
+		for _, mode := range modes {
+			for _, codec := range mode.CodecStrings {
+				advertised = true
+				if strings.EqualFold(codec, "hvc1") || strings.HasPrefix(strings.ToLower(codec), "hvc1.") {
+					return true
+				}
+			}
+		}
+	}
+	// Older receivers do not publish codecStrings. Feature 42 remains their
+	// compatibility signal; a present list is authoritative for its display.
+	return !advertised
+}
+
 type videoSelection struct {
 	codec         VideoCodec
 	width, height int
@@ -84,6 +106,10 @@ func (i *ReceiverInfo) selectVideo(requested VideoCodec, automaticHEVCAvailable 
 		if !i.supportsVideoCodec(VideoCodecHEVC) {
 			width, height := i.MirrorSize()
 			return videoSelection{codec: VideoCodecH264, width: width, height: height, reason: "receiver lacks feature 42"}, nil
+		}
+		if !i.supportsAutomaticHVC1() {
+			width, height := i.MirrorSize()
+			return videoSelection{codec: VideoCodecH264, width: width, height: height, reason: "receiver codec list omits hvc1"}, nil
 		}
 		width, height, ok := i.highResolutionVideoCanvas()
 		if !ok {

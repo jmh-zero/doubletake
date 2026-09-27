@@ -189,12 +189,21 @@ func (i *ReceiverInfo) RequiredPairingCredential() PairingCredential {
 
 // DisplayInfo describes a receiver display advertised in the /info response.
 type DisplayInfo struct {
-	Width           plistNumber `plist:"width"`
-	Height          plistNumber `plist:"height"`
-	WidthPixels     plistNumber `plist:"widthPixels"`
-	HeightPixels    plistNumber `plist:"heightPixels"`
-	WidthPixelsMax  plistNumber `plist:"widthPixelsMax"`
-	HeightPixelsMax plistNumber `plist:"heightPixelsMax"`
+	Width             plistNumber      `plist:"width"`
+	Height            plistNumber      `plist:"height"`
+	WidthPixels       plistNumber      `plist:"widthPixels"`
+	HeightPixels      plistNumber      `plist:"heightPixels"`
+	WidthPixelsMax    plistNumber      `plist:"widthPixelsMax"`
+	HeightPixelsMax   plistNumber      `plist:"heightPixelsMax"`
+	HDRInfo           DisplayHDRInfo   `plist:"HDRInfo"`
+	HDRSupportedModes []DisplayHDRInfo `plist:"HDRSupportedModes"`
+}
+
+// DisplayHDRInfo contains the codec sample entries accepted by one advertised
+// display mode. A codec string begins with its ISO BMFF sample-entry fourcc.
+type DisplayHDRInfo struct {
+	HDRMode      string   `plist:"HDRMode"`
+	CodecStrings []string `plist:"codecStrings"`
 }
 
 // DisplaySize returns the receiver's primary display resolution in pixels, or

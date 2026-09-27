@@ -67,6 +67,39 @@ func TestAutomaticVideoSelectionRequiresReceiverMaximumAndLocalHardware(t *testi
 	}
 }
 
+func TestAutomaticVideoSelectionHonorsAdvertisedSampleEntries(t *testing.T) {
+	info := &ReceiverInfo{
+		Features: uint64(1) << featureScreenMultiCodec,
+		Displays: []DisplayInfo{{
+			WidthPixels: 1920, HeightPixels: 1080,
+			WidthPixelsMax: 3840, HeightPixelsMax: 2160,
+			HDRInfo: DisplayHDRInfo{
+				HDRMode:      "SDR",
+				CodecStrings: []string{"hev1.01.51", "avc1.64002a"},
+			},
+		}},
+	}
+	selection, err := info.selectVideo(VideoCodecAuto, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selection.codec != VideoCodecH264 || selection.width != 1920 || selection.height != 1080 {
+		t.Fatalf("selection = %s %dx%d, want H.264 1920x1080", selection.codec, selection.width, selection.height)
+	}
+	if !strings.Contains(selection.reason, "omits hvc1") {
+		t.Fatalf("reason = %q, want hvc1 capability reason", selection.reason)
+	}
+
+	info.Displays[0].HDRInfo.CodecStrings[0] = "hvc1.1.6.L153"
+	selection, err = info.selectVideo(VideoCodecAuto, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selection.codec != VideoCodecHEVC || selection.width != 3840 || selection.height != 2160 {
+		t.Fatalf("hvc1 selection = %s %dx%d, want HEVC 3840x2160", selection.codec, selection.width, selection.height)
+	}
+}
+
 func TestAutomaticVideoSelectionCapsMaximumPreservingAspect(t *testing.T) {
 	info := &ReceiverInfo{
 		Features: uint64(1) << featureScreenMultiCodec,
