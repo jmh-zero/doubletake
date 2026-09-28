@@ -1088,6 +1088,9 @@ func systemMemoryStagingFormat(target string) string {
 // fresh buffer even when the portal already supplies the encoder's format.
 func buildSystemWaylandVideoPipeline(fd int, nodeID uint32, fps int, encoder encoderResult, maxWidth, maxHeight int, timestampedOutput bool) []string {
 	args := append([]string{"--quiet"}, pipeWireVideoSourceStage(fd, nodeID, fps, false)...)
+	// Desktop pixels are square. PipeWire otherwise exposes a broad PAR range,
+	// whose minimum makes videoscale calculate incorrect borders for tall regions.
+	args = appendGstStage(args, gstStage{"video/x-raw(ANY),pixel-aspect-ratio=1/1"})
 	stagingFormat := systemMemoryStagingFormat(encoder.rawFormat)
 	args = appendGstStage(args, gstStage{"videoconvert"})
 	args = appendGstStage(args, gstStage{fmt.Sprintf("video/x-raw,format=%s", stagingFormat)})

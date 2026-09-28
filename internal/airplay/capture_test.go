@@ -972,6 +972,7 @@ func TestSystemWaylandPipelineDetachesBeforeRetention(t *testing.T) {
 	}
 	wantOrder := []string{
 		"pipewiresrc", "fd=3", "path=42", "do-timestamp=true", "keepalive-time=34",
+		"!", "video/x-raw(ANY),pixel-aspect-ratio=1/1",
 		"!", "videoconvert", "!", "video/x-raw,format=NV12",
 		"!", "videoscale", "add-borders=true", "!", "video/x-raw,width=1920,height=1080,pixel-aspect-ratio=1/1",
 		"!", "videoconvert", "!", "video/x-raw,format=I420",
@@ -980,7 +981,7 @@ func TestSystemWaylandPipelineDetachesBeforeRetention(t *testing.T) {
 		"!", "openh264enc",
 	}
 	if !containsPipelineSequence(pipeline, wantOrder) {
-		t.Fatalf("system conversion must own the frame before scaling, cadence, queuing, and encoding:\n%s", joined)
+		t.Fatalf("system conversion must preserve square pixels and own the frame before scaling, cadence, queuing, and encoding:\n%s", joined)
 	}
 }
 
