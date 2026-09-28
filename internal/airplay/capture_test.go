@@ -1516,41 +1516,32 @@ func TestWaylandCapturePlansRetainSelectedEncoderBackend(t *testing.T) {
 				t.Fatal(err)
 			}
 			plans := waylandCapturePlans(encoder, hasElement)
-			// Try each ownership path with a source-rate request, then retain
-			// those same paths for producers that reject the optional constraint.
-			wantElements := append(append([]string{}, test.wantElements...), test.wantElements...)
-			wantModes := append(append([]waylandPipelineMode{}, test.wantModes...), test.wantModes...)
 			var elements []string
 			var modes []waylandPipelineMode
-			for i, plan := range plans {
+			for _, plan := range plans {
 				elements = append(elements, plan.encoder.parts[0])
 				modes = append(modes, plan.mode)
-				if plan.limitSourceRate != (i < len(test.wantModes)) {
-					t.Fatalf("plan %d source-rate constraint = %t", i, plan.limitSourceRate)
-				}
 			}
-			if !reflect.DeepEqual(elements, wantElements) || !reflect.DeepEqual(modes, wantModes) {
-				t.Fatalf("plans = elements %v modes %v, want %v %v", elements, modes, wantElements, wantModes)
+			if !reflect.DeepEqual(elements, test.wantElements) || !reflect.DeepEqual(modes, test.wantModes) {
+				t.Fatalf("plans = elements %v modes %v, want %v %v", elements, modes, test.wantElements, test.wantModes)
 			}
 		})
 	}
 }
 
-func TestWaylandSourceRateRequestPrecedesConversionAndPreservesFallback(t *testing.T) {
+func TestWaylandPlansUsePortableOutputRateControl(t *testing.T) {
 	encoder := encoderResult{parts: gstStage{"nvh264enc"}, rawFormat: "NV12"}
 	for _, mode := range []waylandPipelineMode{waylandPipelineSystemMemory, waylandPipelineVAMemory, waylandPipelineVAPostprocPlainRaw} {
 		for _, fps := range []int{24, 30, 60} {
-			plan := waylandCapturePlan{encoder: encoder, mode: mode, limitSourceRate: true}
+			plan := waylandCapturePlan{encoder: encoder, mode: mode}
 			args := buildWaylandVideoPipelineForPlan(3, 42, fps, plan, 1920, 1080, true)
 			pipeline := strings.Join(args, " ")
-			want := fmt.Sprintf("keepalive-time=%d ! video/x-raw(ANY),max-framerate=%d/1 !", frameIntervalMillis(fps), fps)
-			if !strings.Contains(pipeline, want) {
-				t.Fatalf("source rate was not requested before conversion: %s", pipeline)
+			if strings.Contains(pipeline, "max-framerate") {
+				t.Fatalf("pipeline used a source caps field rejected by some portals: %s", pipeline)
 			}
-			plan.limitSourceRate = false
-			fallback := strings.Join(buildWaylandVideoPipelineForPlan(3, 42, fps, plan, 1920, 1080, true), " ")
-			if strings.Contains(fallback, "max-framerate") || !strings.Contains(fallback, fmt.Sprintf("framerate=%d/1", fps)) {
-				t.Fatalf("fallback must retain output rate without constraining producer: %s", fallback)
+			if !strings.Contains(pipeline, fmt.Sprintf("keepalive-time=%d", frameIntervalMillis(fps))) ||
+				!strings.Contains(pipeline, fmt.Sprintf("framerate=%d/1", fps)) {
+				t.Fatalf("pipeline must retain source keepalives and paced output: %s", pipeline)
 			}
 		}
 	}

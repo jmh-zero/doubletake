@@ -15,7 +15,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -827,18 +826,14 @@ const (
 )
 
 type waylandCapturePlan struct {
-	encoder         encoderResult
-	mode            waylandPipelineMode
-	limitSourceRate bool
+	encoder encoderResult
+	mode    waylandPipelineMode
 }
 
 func (p waylandCapturePlan) String() string {
 	encoder := "GStreamer encoder"
 	if len(p.encoder.parts) != 0 {
 		encoder = p.encoder.parts[0]
-	}
-	if p.limitSourceRate {
-		encoder += " with source frame-rate negotiation"
 	}
 	switch p.mode {
 	case waylandPipelineVAMemory:
@@ -894,11 +889,10 @@ func lowLatencyVideoQueueStage() gstStage {
 
 func waylandFramePacingStage() gstStage {
 	// The screen sender drives capture at its configured display cadence and
-	// converts each resulting sample timestamp to network time. PipeWire's
-	// max-framerate is only an upper bound, so retain videorate's normal duplicate
-	// behavior to produce that same steady cadence when compositor delivery is
-	// early, late, or briefly idle. This stage follows the ownership boundary in
-	// every pipeline, so a duplicated frame never pins a portal-owned buffer.
+	// converts each resulting sample timestamp to network time. Retain videorate's
+	// normal duplicate behavior to produce that same steady cadence when PipeWire
+	// delivery is early, late, or briefly idle. This stage follows the ownership
+	// boundary in every pipeline, so a duplicate never pins a portal-owned buffer.
 	return gstStage{"videorate", "skip-to-first=true"}
 }
 
@@ -1043,18 +1037,7 @@ func waylandCapturePlans(encoder encoderResult, hasElement func(string) bool) []
 	// can therefore fall back to a CPU-owned frame without changing the selected
 	// encoder backend. Every other encoder has only its normal system-memory plan.
 	plans = append(plans, waylandCapturePlan{encoder: encoder, mode: waylandPipelineSystemMemory})
-	// Request the target rate from the capture source as well as downstream.
-	// A downstream videorate cap alone never requests PipeWire maxFramerate:
-	// a 60/120 Hz compositor can still capture/convert at full speed and produce
-	// uneven frame selection. Ask the producer for the target rate first.
-	// Retain unrestricted plans for producers whose advertised maximum is lower
-	// than our requested rate, or which cannot negotiate this optional field.
-	limited := make([]waylandCapturePlan, 0, 2*len(plans))
-	for _, plan := range plans {
-		plan.limitSourceRate = true
-		limited = append(limited, plan)
-	}
-	return append(limited, plans...)
+	return plans
 }
 
 // systemMemoryStagingFormat deliberately differs from every encoder input
@@ -1152,25 +1135,14 @@ func buildWaylandVideoPipeline(fd int, nodeID uint32, fps int, encoder encoderRe
 }
 
 func buildWaylandVideoPipelineForPlan(fd int, nodeID uint32, fps int, plan waylandCapturePlan, maxWidth, maxHeight int, timestampedOutput bool) []string {
-	var args []string
 	switch plan.mode {
 	case waylandPipelineVAMemory:
-		args = buildVAWaylandVideoPipeline(fd, nodeID, fps, plan.encoder, maxWidth, maxHeight, timestampedOutput)
+		return buildVAWaylandVideoPipeline(fd, nodeID, fps, plan.encoder, maxWidth, maxHeight, timestampedOutput)
 	case waylandPipelineVAPostprocPlainRaw:
-		args = buildVAPostprocPlainRawWaylandVideoPipeline(fd, nodeID, fps, plan.encoder, maxWidth, maxHeight, timestampedOutput)
+		return buildVAPostprocPlainRawWaylandVideoPipeline(fd, nodeID, fps, plan.encoder, maxWidth, maxHeight, timestampedOutput)
 	default:
-		args = buildSystemWaylandVideoPipeline(fd, nodeID, fps, plan.encoder, maxWidth, maxHeight, timestampedOutput)
+		return buildSystemWaylandVideoPipeline(fd, nodeID, fps, plan.encoder, maxWidth, maxHeight, timestampedOutput)
 	}
-	if plan.limitSourceRate {
-		// ANY preserves DMA-BUF/VA import negotiation. This capsfilter does not
-		// retain frames; the existing ownership boundary still precedes videorate.
-		if fps <= 0 {
-			fps = 30
-		}
-		args = slices.Insert(args, slices.Index(args, "!"), "!",
-			fmt.Sprintf("video/x-raw(ANY),max-framerate=%d/1", fps))
-	}
-	return args
 }
 
 const (
