@@ -2,6 +2,9 @@ package airplay
 
 import (
 	"math"
+	"net"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"time"
 )
@@ -27,6 +30,90 @@ const (
 type screenLatencyTargets struct {
 	video time.Duration
 	audio time.Duration
+}
+
+type localNetworkInterface struct {
+	name  string
+	addrs []net.Addr
+}
+
+const networkInterfaceClassPath = "/sys/class/net"
+
+// connectionLatencyHintForConnection mirrors the sender's use of the control
+// connection interface latency hint. A wireless route uses the high-latency
+// screen profile, which leaves enough receiver headroom for normal Wi-Fi jitter.
+// Unknown and non-wireless interfaces retain the ordinary profile.
+func connectionLatencyHintForConnection(conn net.Conn) (connectionLatencyHint, string) {
+	if conn == nil {
+		return connectionLatencyNormal, ""
+	}
+	localAddr, ok := conn.LocalAddr().(*net.TCPAddr)
+	if !ok || localAddr.IP == nil || localAddr.IP.IsUnspecified() {
+		return connectionLatencyNormal, ""
+	}
+
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return connectionLatencyNormal, ""
+	}
+	snapshots := make([]localNetworkInterface, 0, len(interfaces))
+	for _, iface := range interfaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		snapshots = append(snapshots, localNetworkInterface{name: iface.Name, addrs: addrs})
+	}
+	return connectionLatencyHintForLocalIP(localAddr.IP, snapshots, networkInterfaceClassPath)
+}
+
+func connectionLatencyHintForLocalIP(localIP net.IP, interfaces []localNetworkInterface, classPath string) (connectionLatencyHint, string) {
+	if localIP == nil {
+		return connectionLatencyNormal, ""
+	}
+	for _, iface := range interfaces {
+		for _, addr := range iface.addrs {
+			if !networkAddressIP(addr).Equal(localIP) {
+				continue
+			}
+			if networkInterfaceIsWireless(iface.name, classPath) {
+				return connectionLatencyHigh, iface.name
+			}
+			return connectionLatencyNormal, iface.name
+		}
+	}
+	return connectionLatencyNormal, ""
+}
+
+func networkAddressIP(addr net.Addr) net.IP {
+	switch value := addr.(type) {
+	case *net.IPNet:
+		return value.IP
+	case *net.IPAddr:
+		return value.IP
+	default:
+		return nil
+	}
+}
+
+func networkInterfaceIsWireless(name, classPath string) bool {
+	for _, marker := range []string{"wireless", "phy80211"} {
+		if _, err := os.Stat(filepath.Join(classPath, name, marker)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func connectionLatencyHintName(hint connectionLatencyHint) string {
+	switch hint {
+	case connectionLatencyLow:
+		return "low"
+	case connectionLatencyHigh:
+		return "high"
+	default:
+		return "normal"
+	}
 }
 
 // withMinimumVideoLead gives a locally measured capture pipeline enough room

@@ -1,6 +1,7 @@
 package airplay
 
 import (
+	"bufio"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -10,8 +11,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
+	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -50,8 +54,9 @@ const (
 	audioREDPayloadType     = 0x61
 	audioRedundancyCount    = 2
 
-	// Keep an RTP audio datagram within the ordinary IPv4 UDP payload budget.
-	// RFC 2198 history is reduced when encoded frames would exceed this size.
+	// The RTP packet handler uses a 0x5c0-byte packet buffer. Keep the complete
+	// UDP datagram within that bound, which also avoids IPv4 fragmentation on a
+	// standard 1500-byte MTU. RFC 2198 history is reduced when it does not fit.
 	maximumAudioRTPDatagramBytes = 1472
 
 	// AirPlay receivers report missing audio on the control socket with the
@@ -65,6 +70,14 @@ const (
 	// PCM. This queue has no minimum threshold, so it does not add steady-state
 	// latency; source PTS still decides whether a recovered frame is timely.
 	audioCaptureStallBuffer = 250 * time.Millisecond
+
+	// PulseAudio's default source buffer is 200 ms. Pulse-on-PipeWire can then
+	// alternate between one and two graph quanta before releasing a monitor
+	// buffer, leaving too little of the negotiated playout window for network
+	// and scheduler jitter. Limit the source buffer to one requested fragment;
+	// the server may round both values up to its graph quantum.
+	pulseCaptureBufferTime  = 10 * time.Millisecond
+	pulseCaptureLatencyTime = 10 * time.Millisecond
 )
 
 // ErrAACELDUnavailable means this build does not contain the optional FDK-AAC
@@ -114,29 +127,105 @@ func randomRTPTime(reader io.Reader) (uint32, error) {
 
 // AudioCapture manages audio capture via GStreamer and local ALAC encoding.
 type AudioCapture struct {
-	gstCmd      *exec.Cmd
-	pcmPipe     io.ReadCloser
-	pcmFrames   audioPCMFrameReader
-	cancel      context.CancelFunc
-	waitCh      chan struct{}
-	waitErr     error
-	stopped     bool
-	codec       AudioCodec
-	alac        *alacEncoder
-	compactALAC bool
-	eldMu       sync.Mutex
-	eld         *eldEncoder
+	gstCmd           *exec.Cmd
+	pcmPipe          io.ReadCloser
+	pcmFrames        audioPCMFrameReader
+	cancel           context.CancelFunc
+	waitCh           chan struct{}
+	waitErr          error
+	stopped          bool
+	codec            AudioCodec
+	alac             *alacEncoder
+	compactALAC      bool
+	pcmLevelFrames   uint64
+	pcmSamples       uint64
+	pcmClipped       uint64
+	pcmZero          uint64
+	pcmSquared       uint64
+	pcmPeak          int32
+	pcmPrevious      [audioChannels]int32
+	pcmHavePrevious  bool
+	pcmMaxStep       [audioChannels]int32
+	pcmLargeSteps    [audioChannels]uint64
+	pcmSilentFrames  uint64
+	pcmZeroRun       uint64
+	pcmMaxZeroRun    uint64
+	pcmDump          *bufio.Writer
+	pcmDumpFile      *os.File
+	pcmDumpRemaining int64
+	eldMu            sync.Mutex
+	eld              *eldEncoder
 }
 
 var audioTimestampFallbackWarning sync.Once
 
+const debugAudioCaptureSeconds = 30
+
 func supportsTimestampedAudioOutput() bool {
-	for _, element := range []string{"rtpL16pay", "rtponviftimestamp", "rtpstreampay"} {
+	for _, element := range []string{"audiobuffersplit", "rtpL16pay", "rtponviftimestamp", "rtpstreampay"} {
 		if !hasGstElement(element) {
 			return false
 		}
 	}
 	return true
+}
+
+func pulseMonitorSourceArgs(monitor string) []string {
+	return []string{
+		"pulsesrc",
+		fmt.Sprintf("device=%s", monitor),
+		fmt.Sprintf("buffer-time=%d", pulseCaptureBufferTime/time.Microsecond),
+		fmt.Sprintf("latency-time=%d", pulseCaptureLatencyTime/time.Microsecond),
+	}
+}
+
+func pipeWireMonitorSourceArgs(target string) []string {
+	return []string{
+		"pipewiresrc",
+		fmt.Sprintf("target-object=%s", target),
+		"client-name=doubletake",
+	}
+}
+
+func pulseSinkTargetFromList(list, sink string) string {
+	for _, line := range strings.Split(list, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[1] != sink {
+			continue
+		}
+		if _, err := strconv.ParseUint(fields[0], 10, 64); err == nil {
+			return fields[0]
+		}
+	}
+	return ""
+}
+
+func pipeWireSinkTarget(sink string) string {
+	out, err := exec.Command("pactl", "list", "short", "sinks").Output()
+	if err != nil {
+		dbg("[AUDIO] pactl list short sinks failed: %v", err)
+		return ""
+	}
+	return pulseSinkTargetFromList(string(out), sink)
+}
+
+func pulseInfoUsesPipeWire(info string) bool {
+	for _, line := range strings.Split(info, "\n") {
+		key, value, ok := strings.Cut(line, ":")
+		if ok && strings.EqualFold(strings.TrimSpace(key), "Server Name") {
+			return strings.Contains(strings.ToLower(value), "pipewire")
+		}
+	}
+	return false
+}
+
+func pulseServerUsesPipeWire() bool {
+	out, err := exec.Command("pactl", "info").Output()
+	if err != nil {
+		dbg("[AUDIO] pactl info failed: %v", err)
+		return false
+	}
+	return pulseInfoUsesPipeWire(string(out))
 }
 
 func audioCapturePipelineArgs(srcArgs []string, codec AudioCodec, timestamped bool) []string {
@@ -154,6 +243,14 @@ func audioCapturePipelineArgs(srcArgs []string, codec AudioCodec, timestamped bo
 		"!", fmt.Sprintf("audio/x-raw,rate=%d,channels=%d,format=%s,layout=interleaved", audioSampleRate, audioChannels, format),
 	)
 	if timestamped {
+		// The real-time sender is normally driven by one source callback per
+		// codec frame. Give the Go side that same boundary instead of splitting a
+		// sound-server buffer into smaller RTP packets and reconstructing a frame
+		// before holding it on a second timer.
+		args = append(args,
+			"!", "audiobuffersplit", fmt.Sprintf("output-buffer-duration=%d/%d", codecSPF, audioSampleRate),
+			"strict-buffer-size=true",
+		)
 		// Preserve complete source samples through short CPU/GPU scheduling stalls.
 		// The timestamp-aware Go reader can then discard only codec frames whose
 		// negotiated playout deadline has actually passed.
@@ -200,20 +297,29 @@ func StartAudioCapture(ctx context.Context, testTone bool, codec AudioCodec, com
 		srcArgs = []string{"audiotestsrc", "wave=sine", "freq=440", "is-live=true",
 			fmt.Sprintf("samplesperbuffer=%d", codecSPF)}
 		dbg("[AUDIO] using test tone (440 Hz sine wave, live, spf=%d)", codecSPF)
-	} else if exec.Command("gst-inspect-1.0", "pulsesrc").Run() == nil {
-		monitor := detectPulseMonitor()
-		if monitor == "" {
-			cancel()
-			return nil, fmt.Errorf("no PulseAudio monitor source found")
-		}
-		srcArgs = []string{"pulsesrc", fmt.Sprintf("device=%s", monitor)}
-		dbg("[AUDIO] using pulsesrc device=%s", monitor)
-	} else if exec.Command("gst-inspect-1.0", "pipewiresrc").Run() == nil {
-		srcArgs = []string{"pipewiresrc"}
-		dbg("[AUDIO] using pipewiresrc")
 	} else {
-		cancel()
-		return nil, fmt.Errorf("no audio source available (need pulsesrc or pipewiresrc)")
+		hasPipeWireSource := exec.Command("gst-inspect-1.0", "pipewiresrc").Run() == nil
+		hasPulseSource := exec.Command("gst-inspect-1.0", "pulsesrc").Run() == nil
+		monitor := detectPulseMonitor()
+		sink := strings.TrimSuffix(monitor, ".monitor")
+		pipeWireTarget := ""
+		if hasPipeWireSource && sink != "" && pulseServerUsesPipeWire() {
+			pipeWireTarget = pipeWireSinkTarget(sink)
+		}
+		if pipeWireTarget != "" {
+			srcArgs = pipeWireMonitorSourceArgs(pipeWireTarget)
+			dbg("[AUDIO] using direct PipeWire monitor for sink=%s target=%s", sink, pipeWireTarget)
+		} else if hasPulseSource && monitor != "" {
+			srcArgs = pulseMonitorSourceArgs(monitor)
+			dbg("[AUDIO] using pulsesrc device=%s (buffer=%s fragment=%s)",
+				monitor, pulseCaptureBufferTime, pulseCaptureLatencyTime)
+		} else if hasPipeWireSource {
+			srcArgs = []string{"pipewiresrc", "client-name=doubletake"}
+			dbg("[AUDIO] using default pipewiresrc")
+		} else {
+			cancel()
+			return nil, fmt.Errorf("no audio source available (need pulsesrc or pipewiresrc)")
+		}
 	}
 
 	ac := &AudioCapture{
@@ -222,17 +328,30 @@ func StartAudioCapture(ctx context.Context, testTone bool, codec AudioCodec, com
 		codec:       codec,
 		compactALAC: compactALAC,
 	}
+	if DebugMode() {
+		pcmDumpFile, dumpErr := os.CreateTemp("", "doubletake-audio-capture-*.s16le")
+		if dumpErr != nil {
+			dbg("[AUDIO-CAPTURE] could not create PCM diagnostic: %v", dumpErr)
+		} else {
+			ac.pcmDumpFile = pcmDumpFile
+			ac.pcmDump = bufio.NewWriterSize(pcmDumpFile, 64*1024)
+			ac.pcmDumpRemaining = int64(debugAudioCaptureSeconds * audioSampleRate * audioBytesPerSampleFrame)
+			dbg("[AUDIO-CAPTURE] recording the first %ds of encoder input to %s (stereo S16LE, %d Hz)",
+				debugAudioCaptureSeconds, pcmDumpFile.Name(), audioSampleRate)
+		}
+	}
 	if codec == AudioCodecALAC {
 		if compactALAC {
 			ac.alac = &alacEncoder{}
 			dbg("[AUDIO] using compact ALAC for RFC 2198 packet redundancy")
 		} else {
-			dbg("[AUDIO] using ALAC escape frames for legacy packet redundancy")
+			dbg("[AUDIO] using ALAC escape frames")
 		}
 	} else if codec == AudioCodecAACELD {
 		var err error
 		ac.eld, err = newELDEncoder()
 		if err != nil {
+			ac.closeDebugPCM()
 			cancel()
 			return nil, err
 		}
@@ -250,6 +369,7 @@ func StartAudioCapture(ctx context.Context, testTone bool, codec AudioCodec, com
 	gstCmd := exec.CommandContext(captureCtx, "gst-launch-1.0", gstArgs...)
 	gstStdout, err := gstCmd.StdoutPipe()
 	if err != nil {
+		ac.closeDebugPCM()
 		if ac.eld != nil {
 			ac.eld.Close()
 			ac.eld = nil
@@ -261,6 +381,7 @@ func StartAudioCapture(ctx context.Context, testTone bool, codec AudioCodec, com
 
 	waitResult, err := startGStreamerCommand(gstCmd)
 	if err != nil {
+		ac.closeDebugPCM()
 		if ac.eld != nil {
 			ac.eld.Close()
 			ac.eld = nil
@@ -327,6 +448,8 @@ func (ac *AudioCapture) readFramePosition(buf []byte) (int, audioPCMFramePositio
 	if err != nil {
 		return 0, audioPCMFramePosition{}, err
 	}
+	ac.writeDebugPCM(pcm)
+	ac.recordPCMLevels(pcm)
 	if ac.codec == AudioCodecAACELD {
 		ac.eldMu.Lock()
 		defer ac.eldMu.Unlock()
@@ -344,6 +467,107 @@ func (ac *AudioCapture) readFramePosition(buf []byte) (int, audioPCMFramePositio
 	}
 	n := ac.alac.Encode(buf, pcm)
 	return n, position, nil
+}
+
+func (ac *AudioCapture) writeDebugPCM(pcm []byte) {
+	if ac.pcmDump == nil || ac.pcmDumpRemaining <= 0 {
+		return
+	}
+	if int64(len(pcm)) > ac.pcmDumpRemaining {
+		pcm = pcm[:ac.pcmDumpRemaining]
+	}
+	written, err := ac.pcmDump.Write(pcm)
+	ac.pcmDumpRemaining -= int64(written)
+	if err != nil || written != len(pcm) {
+		if err == nil {
+			err = io.ErrShortWrite
+		}
+		dbg("[AUDIO-CAPTURE] PCM diagnostic write failed: %v", err)
+		ac.closeDebugPCM()
+		return
+	}
+	if ac.pcmDumpRemaining == 0 {
+		dbg("[AUDIO-CAPTURE] PCM diagnostic reached its %ds limit", debugAudioCaptureSeconds)
+		ac.closeDebugPCM()
+	}
+}
+
+func (ac *AudioCapture) closeDebugPCM() {
+	if ac.pcmDump != nil {
+		if err := ac.pcmDump.Flush(); err != nil {
+			dbg("[AUDIO-CAPTURE] PCM diagnostic flush failed: %v", err)
+		}
+		ac.pcmDump = nil
+	}
+	if ac.pcmDumpFile != nil {
+		if err := ac.pcmDumpFile.Close(); err != nil {
+			dbg("[AUDIO-CAPTURE] PCM diagnostic close failed: %v", err)
+		}
+		ac.pcmDumpFile = nil
+	}
+}
+
+func (ac *AudioCapture) recordPCMLevels(pcm []byte) {
+	for offset := 0; offset+audioBytesPerSampleFrame <= len(pcm); offset += audioBytesPerSampleFrame {
+		silent := true
+		for channel := 0; channel < audioChannels; channel++ {
+			sampleOffset := offset + channel*audioBytesPerSample
+			sample := int32(int16(binary.LittleEndian.Uint16(pcm[sampleOffset : sampleOffset+audioBytesPerSample])))
+			level := sample
+			if level < 0 {
+				level = -level
+			}
+			ac.pcmPeak = max(ac.pcmPeak, level)
+			if level >= 32767 {
+				ac.pcmClipped++
+			}
+			if sample == 0 {
+				ac.pcmZero++
+			} else {
+				silent = false
+			}
+			if ac.pcmHavePrevious {
+				step := sample - ac.pcmPrevious[channel]
+				if step < 0 {
+					step = -step
+				}
+				ac.pcmMaxStep[channel] = max(ac.pcmMaxStep[channel], step)
+				if step >= 8192 {
+					ac.pcmLargeSteps[channel]++
+				}
+			}
+			ac.pcmPrevious[channel] = sample
+			ac.pcmSquared += uint64(int64(sample) * int64(sample))
+			ac.pcmSamples++
+		}
+		ac.pcmHavePrevious = true
+		if silent {
+			ac.pcmSilentFrames++
+			ac.pcmZeroRun++
+			ac.pcmMaxZeroRun = max(ac.pcmMaxZeroRun, ac.pcmZeroRun)
+		} else {
+			ac.pcmZeroRun = 0
+		}
+	}
+	ac.pcmLevelFrames++
+	if ac.pcmLevelFrames < 125 {
+		return
+	}
+	rms := int(math.Round(math.Sqrt(float64(ac.pcmSquared) / float64(ac.pcmSamples))))
+	dbg("[AUDIO-CAPTURE] levels peak=%d/32768 rms=%d/32768 zero=%d/%d clipped=%d/%d silent-frames=%d/%d longest-silence=%d samples max-step=%d/%d large-step=%d/%d",
+		ac.pcmPeak, rms, ac.pcmZero, ac.pcmSamples, ac.pcmClipped, ac.pcmSamples,
+		ac.pcmSilentFrames, ac.pcmSamples/audioChannels, ac.pcmMaxZeroRun,
+		ac.pcmMaxStep[0], ac.pcmMaxStep[1], ac.pcmLargeSteps[0], ac.pcmLargeSteps[1])
+	ac.pcmLevelFrames = 0
+	ac.pcmSamples = 0
+	ac.pcmClipped = 0
+	ac.pcmZero = 0
+	ac.pcmSquared = 0
+	ac.pcmPeak = 0
+	ac.pcmMaxStep = [audioChannels]int32{}
+	ac.pcmLargeSteps = [audioChannels]uint64{}
+	ac.pcmSilentFrames = 0
+	ac.pcmMaxZeroRun = ac.pcmZeroRun
 }
 
 // DrainStale discards any PCM that buffered in the OS pipe between capture
@@ -397,6 +621,7 @@ func (ac *AudioCapture) Stop() {
 		return
 	}
 	ac.stopped = true
+	ac.closeDebugPCM()
 	if ac.cancel != nil {
 		ac.cancel()
 	}
@@ -431,7 +656,7 @@ func (ac *AudioCapture) Stop() {
 //	tag(3)            = 1 (TYPE_CPE for stereo)
 //	elementInstance(4)= 0
 //	unused(12)        = 0
-//	hasSize(1)        = 1 (include 32-bit sample count)
+//	hasSize(1)        = 1 (include the packet's 32-bit sample count)
 //	extraBytes(2)     = 0 (16-bit, no shift)
 //	verbatim(1)       = 1
 //	numSamples(32)    = frameSize
@@ -575,10 +800,10 @@ func (s *MirrorSession) AudioCodec() AudioCodec {
 	return AudioCodec(s.audioStream.ct)
 }
 
-// UsesCompactALAC reports whether this session negotiated RFC 2198 compound
-// redundancy. Its 10-bit block length requires encoded ALAC frames below 1024
-// bytes. Legacy packet redundancy carries each ALAC frame independently and
-// uses the broadly supported escape representation instead.
+// UsesCompactALAC reports whether capture should use compressed ALAC frames.
+// RFC 2198 can describe redundant blocks only up to 1023 bytes, so compact
+// frames are required for the negotiated packet history to fit on the wire.
+// Legacy RTP transports continue to use the simpler escape representation.
 func (s *MirrorSession) UsesCompactALAC() bool {
 	return s != nil && s.audioStream != nil && s.audioStream.rfc2198 &&
 		AudioCodec(s.audioStream.ct) == AudioCodecALAC
@@ -1091,29 +1316,30 @@ func (as *AudioStream) sendSyncPacketAt(timingProtocol string, networkTime, time
 	}
 	// seq field is constant 4 in working pcap captures
 	binary.BigEndian.PutUint16(packet[2:4], 4)
+	playheadRTP := rtpNow - latencySamples
 
 	if timingProtocol == timingProtocolPTP {
-		// PTP TimeAnnounce: the first RTP value is the media position at the
-		// announced network time; the second is the future RTP position at which
-		// the receiver applies the mapping. Apple senders keep those positions one
-		// negotiated audio latency apart.
+		// PTP TimeAnnounce carries the media position at the announced network
+		// time twice: once as rtpTime and once as rtpApply. The sender constructs
+		// both fields from the same audio-clock sample. The negotiated latency is
+		// represented by mapping that playhead behind the captured source frame,
+		// not by deferring application to a later RTP timestamp.
 		packet[1] = audioSyncPayloadTypePTP
-		syncRTP := rtpNow - latencySamples
-		binary.BigEndian.PutUint32(packet[4:8], syncRTP)
+		binary.BigEndian.PutUint32(packet[4:8], playheadRTP)
 		binary.BigEndian.PutUint64(packet[8:16], ptpNanoseconds(networkTime))
-		binary.BigEndian.PutUint32(packet[16:20], rtpNow)
+		binary.BigEndian.PutUint32(packet[16:20], playheadRTP)
 		binary.BigEndian.PutUint64(packet[20:28], timelineID)
 	} else {
-		// Legacy NTP TimeAnnounce: playback RTP, NTP seconds.32, receive RTP.
+		// Legacy NTP TimeAnnounce uses the same RTP value for rtpTime and
+		// rtpApply around the NTP seconds.32 clock sample.
 		packet[1] = audioSyncPayloadTypeNTP
-		syncRtp := rtpNow - latencySamples
-		binary.BigEndian.PutUint32(packet[4:8], syncRtp)
+		binary.BigEndian.PutUint32(packet[4:8], playheadRTP)
 		binary.BigEndian.PutUint64(packet[8:16], networkTime)
-		binary.BigEndian.PutUint32(packet[16:20], rtpNow)
+		binary.BigEndian.PutUint32(packet[16:20], playheadRTP)
 	}
 
-	dbg("[AUDIO-SYNC] first=%t rtp=%d latency=%d network=0x%016x timeline=0x%016x",
-		isFirst, rtpNow, latencySamples, networkTime, timelineID)
+	dbg("[AUDIO-SYNC] first=%t sourceRTP=%d playheadRTP=%d latency=%d network=0x%016x timeline=0x%016x",
+		isFirst, rtpNow, playheadRTP, latencySamples, networkTime, timelineID)
 	_, err := as.ctrlConn.WriteTo(packet, as.ctrlAddr)
 	return err
 }
@@ -1147,6 +1373,7 @@ const (
 	maximumInitialCatchupFrames = 128
 	audioSendBurstWindow        = 5 * time.Millisecond
 	maximumAudioPacketsPerBurst = 12
+	preferredAudioPacingFrames  = 8
 )
 
 // audioSendBurstLimiter bounds only catch-up bursts. At normal ALAC/AAC-ELD
@@ -1190,15 +1417,74 @@ func (limiter *audioSendBurstLimiter) wait(ctx context.Context) error {
 	}
 }
 
+// audioPacingFramesForLatency sizes the sender's staging reservoir without
+// consuming the minimum network lead. The high-latency screen profile can hold
+// eight ALAC frames, enough for the 32-60 ms callback batches observed from a
+// 48 kHz PipeWire monitor after conversion to 44.1 kHz. Lower-latency sessions
+// automatically retain fewer frames.
+func audioPacingFramesForLatency(latencySamples, frameSamples uint32) uint32 {
+	if frameSamples == 0 {
+		return 0
+	}
+	budget := audioLatencyDuration(latencySamples) - minimumAudioSendLead
+	if budget <= 0 {
+		return 0
+	}
+	frames := uint32(budget / audioSamplesDuration(uint64(frameSamples)))
+	if frames > preferredAudioPacingFrames {
+		return preferredAudioPacingFrames
+	}
+	return frames
+}
+
+// audioFramePacer stages codec frames, then releases them at their RTP sample
+// cadence. Its reservoir separates the batched callbacks produced by Linux
+// sound servers from timed network sends.
+type audioFramePacer struct {
+	anchorRTP    uint32
+	anchorTime   time.Time
+	bufferFrames uint32
+}
+
+func (pacer *audioFramePacer) reserveDelay(now time.Time, rtpTime, frameSamples uint32) time.Duration {
+	if now.IsZero() || frameSamples == 0 {
+		return 0
+	}
+	if pacer.anchorTime.IsZero() {
+		pacer.anchorRTP = rtpTime
+		pacer.anchorTime = now.Add(audioSamplesDuration(uint64(frameSamples) * uint64(pacer.bufferFrames)))
+	}
+	target := pacer.anchorTime.Add(audioSamplesDuration(uint64(rtpTime - pacer.anchorRTP)))
+	if delay := target.Sub(now); delay > 0 {
+		return delay
+	}
+	return 0
+}
+
+func (pacer *audioFramePacer) wait(ctx context.Context, rtpTime, frameSamples uint32) error {
+	delay := pacer.reserveDelay(time.Now(), rtpTime, frameSamples)
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 func audioLatencyDuration(samples uint32) time.Duration {
 	return audioSamplesDuration(uint64(samples))
 }
 
-func audioFrameIsStale(pts, now time.Time, latencySamples uint32) bool {
+func audioFrameIsStale(pts, now time.Time, latencySamples uint32, sendLead time.Duration) bool {
 	if pts.IsZero() || now.IsZero() {
 		return false
 	}
-	return !pts.Add(audioLatencyDuration(latencySamples)).After(now.Add(minimumAudioSendLead))
+	return !pts.Add(audioLatencyDuration(latencySamples)).After(now.Add(sendLead))
 }
 
 func (as *AudioStream) Close() {
@@ -1224,6 +1510,10 @@ func (s *MirrorSession) StreamAudio(ctx context.Context, capture *AudioCapture, 
 	}()
 
 	spf := uint32(audioStream.spf)
+	pacingFrames := audioPacingFramesForLatency(audioStream.latencySamples, spf)
+	pacingDuration := audioSamplesDuration(uint64(spf) * uint64(pacingFrames))
+	pacingSendLead := minimumAudioSendLead + pacingDuration
+	dbg("[AUDIO] pacing reservoir: %d frames (%v)", pacingFrames, pacingDuration)
 
 	// Prewarm the capture while waiting for the first presentable video frame.
 	// GStreamer starts producing PCM immediately; continuously consuming and
@@ -1285,7 +1575,7 @@ videoReady:
 			}
 			return fmt.Errorf("audio read first frame: %w", err)
 		}
-		if firstFrameSize > 0 && audioFrameIsStale(firstFramePosition.PTS, time.Now(), audioStream.latencySamples) {
+		if firstFrameSize > 0 && audioFrameIsStale(firstFramePosition.PTS, time.Now(), audioStream.latencySamples, pacingSendLead) {
 			catchupFrames++
 			if catchupFrames >= maximumInitialCatchupFrames {
 				age := time.Since(firstFramePosition.PTS)
@@ -1391,6 +1681,7 @@ videoReady:
 		dbg("[AUDIO] packet redundancy enabled: current frame plus two recent frames")
 	}
 	var burstLimiter audioSendBurstLimiter
+	framePacer := audioFramePacer{bufferFrames: pacingFrames}
 	sendPacket := func(payload []byte, rtpTime uint32, seq uint16, payloadType byte, reuseNonce *uint64) (uint64, error) {
 		if err := burstLimiter.wait(ctx); err != nil {
 			return 0, err
@@ -1419,6 +1710,14 @@ videoReady:
 	framePTS := firstFramePosition.PTS
 	frameRTP := firstFrameRTP
 	staleFrames := 0
+	lastTimingReportAt := time.Time{}
+	lastTimingReportRTP := firstFrameRTP
+	lastFrameSentAt := time.Time{}
+	minFrameSendGap := time.Duration(0)
+	maxFrameSendGap := time.Duration(0)
+	frameSendGaps := 0
+	minRedundantFrames := audioRedundancyCount
+	maxRedundantFrames := 0
 
 	for {
 		select {
@@ -1450,7 +1749,7 @@ videoReady:
 			framePTS = firstFramePosition.PTS.Add(audioSamplesDuration(uint64(frameCount) * uint64(spf)))
 			framePosition.PTS = framePTS
 		}
-		if !usingFirstFrame && timestampedAudio && audioFrameIsStale(framePTS, time.Now(), audioStream.latencySamples) {
+		if !usingFirstFrame && timestampedAudio && audioFrameIsStale(framePTS, time.Now(), audioStream.latencySamples, pacingSendLead) {
 			staleFrames++
 			if staleFrames == 1 || staleFrames%100 == 0 {
 				dbg("[AUDIO] dropping stale source frame %v old (latency=%v, dropped=%d)",
@@ -1487,6 +1786,10 @@ videoReady:
 		copy(payload, frameBuf[:n])
 
 		frameCount++
+		if err := framePacer.wait(ctx, frameRTP, spf); err != nil {
+			return err
+		}
+		redundantFrames := 0
 		if !useRedundancy {
 			// Single-send: send each frame once
 			if _, err := sendPacket(payload, frameRTP, frameSeq, audioDataPayloadType, nil); err != nil {
@@ -1494,6 +1797,11 @@ videoReady:
 			}
 		} else if audioStream.rfc2198 {
 			redPayload := composeAudioREDPayload(payload, frameRTP, redHistory, audioStream.maximumPlainAudioPayloadBytes())
+			clearPrefix, headerErr := audioREDHeaderLength(redPayload)
+			if headerErr != nil {
+				return fmt.Errorf("compose audio redundancy: %w", headerErr)
+			}
+			redundantFrames = (clearPrefix - 1) / 4
 			if err := burstLimiter.wait(ctx); err != nil {
 				return err
 			}
@@ -1523,8 +1831,42 @@ videoReady:
 				frame.nonce = nonce
 			}
 		}
+		if audioStream.rfc2198 {
+			minRedundantFrames = min(minRedundantFrames, redundantFrames)
+			maxRedundantFrames = max(maxRedundantFrames, redundantFrames)
+		}
 
 		frameSeq++
+		now := time.Now()
+		if !lastFrameSentAt.IsZero() {
+			gap := now.Sub(lastFrameSentAt)
+			if frameSendGaps == 0 || gap < minFrameSendGap {
+				minFrameSendGap = gap
+			}
+			maxFrameSendGap = max(maxFrameSendGap, gap)
+			frameSendGaps++
+		}
+		lastFrameSentAt = now
+		if lastTimingReportAt.IsZero() || frameCount%125 == 0 {
+			elapsed := time.Duration(0)
+			mediaDuration := time.Duration(0)
+			if !lastTimingReportAt.IsZero() {
+				elapsed = now.Sub(lastTimingReportAt)
+				mediaDuration = audioSamplesDuration(uint64(frameRTP - lastTimingReportRTP))
+			}
+			sourceAge := now.Sub(framePTS)
+			dbg("[AUDIO-TIMING] frame=%d rtp=%d source-age=%v playout-lead=%v interval=%v media=%v skew=%v send-gap=%v..%v encoded=%d redundancy=%d..%d",
+				frameCount, frameRTP, sourceAge, audioLatencyDuration(audioStream.latencySamples)-sourceAge,
+				elapsed, mediaDuration, elapsed-mediaDuration, minFrameSendGap, maxFrameSendGap, n,
+				minRedundantFrames, maxRedundantFrames)
+			lastTimingReportAt = now
+			lastTimingReportRTP = frameRTP
+			minFrameSendGap = 0
+			maxFrameSendGap = 0
+			frameSendGaps = 0
+			minRedundantFrames = audioRedundancyCount
+			maxRedundantFrames = 0
+		}
 
 		if frameCount <= 10 || frameCount%100 == 0 {
 			hexStart := n

@@ -1,6 +1,9 @@
 package airplay
 
 import (
+	"net"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -98,5 +101,59 @@ func TestMinimumVideoLeadPreservesAutomaticAudioVideoDelta(t *testing.T) {
 	got := targets.withMinimumVideoLead(150 * time.Millisecond)
 	if got.video != 150*time.Millisecond || got.audio != 160*time.Millisecond {
 		t.Fatalf("calibrated targets = video %v audio %v, want 150ms/160ms", got.video, got.audio)
+	}
+}
+
+func TestConnectionLatencyHintFollowsLocalInterface(t *testing.T) {
+	classPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(classPath, "wlan0", "wireless"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(classPath, "wlan1", "phy80211"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	interfaces := []localNetworkInterface{
+		{name: "eth0", addrs: []net.Addr{&net.IPNet{IP: net.ParseIP("192.0.2.10"), Mask: net.CIDRMask(24, 32)}}},
+		{name: "wlan0", addrs: []net.Addr{&net.IPNet{IP: net.ParseIP("192.0.2.20"), Mask: net.CIDRMask(24, 32)}}},
+		{name: "wlan1", addrs: []net.Addr{&net.IPAddr{IP: net.ParseIP("2001:db8::20")}}},
+	}
+
+	tests := []struct {
+		name      string
+		ip        net.IP
+		wantHint  connectionLatencyHint
+		wantIface string
+	}{
+		{name: "wired", ip: net.ParseIP("192.0.2.10"), wantHint: connectionLatencyNormal, wantIface: "eth0"},
+		{name: "wireless marker", ip: net.ParseIP("192.0.2.20"), wantHint: connectionLatencyHigh, wantIface: "wlan0"},
+		{name: "phy marker", ip: net.ParseIP("2001:db8::20"), wantHint: connectionLatencyHigh, wantIface: "wlan1"},
+		{name: "unknown", ip: net.ParseIP("192.0.2.30"), wantHint: connectionLatencyNormal, wantIface: ""},
+		{name: "nil", ip: nil, wantHint: connectionLatencyNormal, wantIface: ""},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			gotHint, gotIface := connectionLatencyHintForLocalIP(test.ip, interfaces, classPath)
+			if gotHint != test.wantHint || gotIface != test.wantIface {
+				t.Fatalf("hint/interface = %s/%q, want %s/%q",
+					connectionLatencyHintName(gotHint), gotIface,
+					connectionLatencyHintName(test.wantHint), test.wantIface)
+			}
+		})
+	}
+}
+
+func TestConnectionLatencyHintName(t *testing.T) {
+	tests := map[connectionLatencyHint]string{
+		connectionLatencyLow:     "low",
+		connectionLatencyNormal:  "normal",
+		connectionLatencyHigh:    "high",
+		connectionLatencyHint(9): "normal",
+	}
+	for hint, want := range tests {
+		if got := connectionLatencyHintName(hint); got != want {
+			t.Fatalf("hint %d name = %q, want %q", hint, got, want)
+		}
 	}
 }

@@ -14,7 +14,7 @@ AirPlay screen mirroring sender for Linux. Streams your desktop to an Apple TV u
 - mDNS device discovery
 - Daemon mode with multi-target streaming control (`doubletake-ctl`)
 - In-process test receiver for hardware-free pairing and media-flow tests
-- Automatic AirPlay screen/audio latency policy with an optional `-target-latency-ms` override
+- Automatic connection-aware screen/audio latency policy with an optional `-target-latency-ms` override
 - KDE Plasma widget for quick access (see [plasmoid/](plasmoid/))
 
 ## Requirements
@@ -270,7 +270,7 @@ doubletake-ctl disconnect
 | `-pair` | false | Force new pairing |
 | `-fps` | 30 | Frames per second |
 | `-bitrate` | 0 | Video bitrate in kbps (`0` = auto) |
-| `-target-latency-ms` | 0 | Joint audio/video playout latency override in milliseconds (`0` = automatic AirPlay policy with separate defaults) |
+| `-target-latency-ms` | 0 | Joint audio/video playout latency override in milliseconds (`0` = automatic wired/wireless profiles with separate audio/video defaults) |
 | `-hwaccel` | auto | Encoder preference: `auto`, `nvenc`, `vaapi`, `openh264`, `none` |
 | `-video-codec` | auto | Screen codec: compatible H.264 `auto`, forced `h264`, or forced `hevc` |
 | `-no-encrypt` | false | Disable RTSP header encryption (debugging only) |

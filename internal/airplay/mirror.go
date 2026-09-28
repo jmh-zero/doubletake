@@ -568,11 +568,17 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		go ntpTimingResponder(sessionCtx, timingConn)
 	}
 
-	// The transport currently exposes no semantic connection-latency hint, so
-	// use Apple's ordinary connection policy. Timing protocol only changes the
-	// clock conversion; it does not select a different playout lead.
-	latencies := screenLatenciesForHint(connectionLatencyNormal)
-	dbg("[SETUP] base screen latency policy: video=%v audio=%v", latencies.video, latencies.audio)
+	// Select the same low/normal/high screen profiles from the control route's
+	// interface latency hint. Timing protocol only changes clock conversion.
+	latencyHint, routeInterface := connectionLatencyHintForConnection(c.conn)
+	latencies := screenLatenciesForHint(latencyHint)
+	if routeInterface == "" {
+		dbg("[SETUP] base screen latency policy: hint=%s interface=unknown video=%v audio=%v",
+			connectionLatencyHintName(latencyHint), latencies.video, latencies.audio)
+	} else {
+		dbg("[SETUP] base screen latency policy: hint=%s interface=%s video=%v audio=%v",
+			connectionLatencyHintName(latencyHint), routeInterface, latencies.video, latencies.audio)
+	}
 
 	// Apple's sender prepares the receiver with a control-only SETUP before it
 	// creates media streams. Older protocol implementations can explicitly

@@ -47,12 +47,7 @@ func TestALACVerbatimEncoding(t *testing.T) {
 	if out[1] != 0x00 {
 		t.Errorf("byte 1: got 0x%02x, want 0x00", out[1])
 	}
-	// Byte 2 contains packed flag/sample-count boundary bits; keep this check
-	// loose and rely on the exact known-good prefix below.
-	if out[2] == 0x00 {
-		t.Errorf("byte 2 unexpectedly zero")
-	}
-	if n >= 8 {
+	if n >= 7 {
 		wantPrefix := "200012000002c0"
 		gotPrefix := hex.EncodeToString(out[:7])
 		if gotPrefix != wantPrefix {
@@ -60,9 +55,7 @@ func TestALACVerbatimEncoding(t *testing.T) {
 		}
 	}
 
-	// Expected frame size: hasSize=1, with 32-bit numSamples field
-	// = 23 header bits + 32 numSamples + 352*2*16 sample bits + 3 end bits
-	// = 23 + 32 + 11264 + 3 = 11322 bits = 1415.25 → 1416 bytes
+	// Expected frame size includes the explicit 32-bit sample count.
 	expectedSize := (23 + 32 + spf*channels*16 + 3 + 7) / 8 // round up
 	t.Logf("Expected size: %d bytes", expectedSize)
 	if n != expectedSize {
@@ -109,11 +102,14 @@ func TestALACCompressedEncoding(t *testing.T) {
 		t.Fatalf("first byte = 0x%02x, want stereo channel-pair element", out[0])
 	}
 	// The element flags begin after the 3-bit tag, 4-bit instance, and
-	// 12 reserved bits. For a 352-sample packet they must say partial frame,
-	// no shifted bytes, and compressed (1000 binary).
+	// 12 reserved bits. The packet carries an explicit sample count and is
+	// compressed without shifted bytes.
 	flags := (uint16(out[2])<<8 | uint16(out[3])) >> 9 & 0xf
 	if flags != 8 {
-		t.Fatalf("element flags = 0x%x, want partial compressed frame (0x8)", flags)
+		t.Fatalf("element flags = 0x%x, want explicit-size compressed frame", flags)
+	}
+	if got, want := hex.EncodeToString(out[:7]), "200010000002c0"; got != want {
+		t.Fatalf("compressed header prefix = %s, want %s", got, want)
 	}
 	reader := h264BitReader{data: out}
 	if got := reader.readBits(3); got != 1 {
@@ -195,6 +191,64 @@ func TestALACCompressedFrameDecodesLosslessly(t *testing.T) {
 	}
 }
 
+func TestALACCompressedStreamDecodesLosslesslyAcrossSilence(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg is unavailable for independent ALAC decode")
+	}
+
+	const frameCount = 12
+	pcm := make([]byte, frameCount*alacScreenFrameSamples*audioBytesPerSampleFrame)
+	for sampleIndex := 0; sampleIndex < frameCount*alacScreenFrameSamples; sampleIndex++ {
+		// Exercise the transitions seen in live capture: whole silent packets,
+		// signal starting and stopping at packet boundaries, and zero runs inside
+		// otherwise active packets.
+		var left, right int16
+		switch {
+		case sampleIndex < 2*alacScreenFrameSamples:
+		case sampleIndex < 7*alacScreenFrameSamples:
+			left = int16(math.Sin(2*math.Pi*440*float64(sampleIndex)/44100) * 16000)
+			right = int16(math.Sin(2*math.Pi*659.25*float64(sampleIndex)/44100) * 12000)
+		case sampleIndex < 9*alacScreenFrameSamples:
+			if sampleIndex%64 >= 24 {
+				left = int16((sampleIndex*7919)%60001 - 30000)
+				right = -left
+			}
+		}
+		offset := sampleIndex * audioBytesPerSampleFrame
+		binary.LittleEndian.PutUint16(pcm[offset:], uint16(left))
+		binary.LittleEndian.PutUint16(pcm[offset+2:], uint16(right))
+	}
+
+	encoder := &alacEncoder{}
+	frames := make([][]byte, frameCount)
+	for frameIndex := range frames {
+		start := frameIndex * alacScreenFrameSamples * audioBytesPerSampleFrame
+		encoded := make([]byte, 4096)
+		n := encoder.Encode(encoded, pcm[start:start+alacScreenFrameSamples*audioBytesPerSampleFrame])
+		frames[frameIndex] = append([]byte(nil), encoded[:n]...)
+	}
+
+	temporary := t.TempDir()
+	cafPath := filepath.Join(temporary, "stream.caf")
+	pcmPath := filepath.Join(temporary, "decoded.pcm")
+	if err := os.WriteFile(cafPath, multiFrameALACCAF(frames), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(ffmpeg, "-v", "error", "-y", "-i", cafPath,
+		"-f", "s16le", "-acodec", "pcm_s16le", pcmPath)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("ffmpeg rejected ALAC stream: %v\n%s", err, output)
+	}
+	decoded, err := os.ReadFile(pcmPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(decoded, pcm) {
+		t.Fatalf("decoded PCM differs across silence transitions: got %d bytes, want %d", len(decoded), len(pcm))
+	}
+}
+
 func TestAudioCaptureSelectsALACRepresentationForTransport(t *testing.T) {
 	pcm := testALACPCM()
 	for _, test := range []struct {
@@ -227,7 +281,7 @@ func TestAudioCaptureSelectsALACRepresentationForTransport(t *testing.T) {
 	}
 }
 
-func TestMirrorSessionUsesCompactALACOnlyForRFC2198(t *testing.T) {
+func TestMirrorSessionUsesCompactALACForRFC2198(t *testing.T) {
 	if (*MirrorSession)(nil).UsesCompactALAC() {
 		t.Fatal("nil session selected compact ALAC")
 	}
@@ -237,7 +291,11 @@ func TestMirrorSessionUsesCompactALACOnlyForRFC2198(t *testing.T) {
 	}
 	compound := &MirrorSession{audioStream: &AudioStream{rfc2198: true, ct: byte(AudioCodecALAC)}}
 	if !compound.UsesCompactALAC() {
-		t.Fatal("RFC 2198 session did not select compact ALAC")
+		t.Fatal("RFC 2198 ALAC session did not select compact ALAC")
+	}
+	aacELD := &MirrorSession{audioStream: &AudioStream{rfc2198: true, ct: byte(AudioCodecAACELD)}}
+	if aacELD.UsesCompactALAC() {
+		t.Fatal("RFC 2198 AAC-ELD session selected compact ALAC")
 	}
 }
 
@@ -265,14 +323,17 @@ func testALACNoisePCM() []byte {
 }
 
 func singleFrameALACCAF(frame []byte) []byte {
-	// CAF metadata for 44.1 kHz, stereo, 16-bit ALAC with the standard
-	// 4096-sample configuration. The packet itself carries the partial-frame
-	// count of 352 used by screen audio.
+	return multiFrameALACCAF([][]byte{frame})
+}
+
+func multiFrameALACCAF(frames [][]byte) []byte {
+	// CAF metadata for the negotiated 44.1 kHz, stereo, 16-bit screen-audio
+	// format. Its configured frame length and each packet are both 352 samples.
 	prefix, err := hex.DecodeString(
 		"6361666600010000" +
 			"64657363000000000000002040e5888000000000616c61630000000000000000000010000000000200000000" +
 			"6368616e000000000000000c006500020000000000000000" +
-			"6b756b6900000000000000300000000c66726d61616c616300000024616c616300000000000010000010280a0e02000000004004001588800000ac44")
+			"6b756b6900000000000000300000000c66726d61616c616300000024616c616300000000000001600010280a0e02000000004004001588800000ac44")
 	if err != nil {
 		panic(err)
 	}
@@ -280,18 +341,27 @@ func singleFrameALACCAF(frame []byte) []byte {
 	var caf bytes.Buffer
 	caf.Write(prefix)
 	caf.WriteString("data")
-	_ = binary.Write(&caf, binary.BigEndian, uint64(len(frame)+4))
+	dataLength := 4
+	packetTableLength := 24
+	for _, frame := range frames {
+		dataLength += len(frame)
+		packetTableLength += len(cafVariableInteger(uint64(len(frame))))
+	}
+	_ = binary.Write(&caf, binary.BigEndian, uint64(dataLength))
 	_ = binary.Write(&caf, binary.BigEndian, uint32(0))
-	caf.Write(frame)
+	for _, frame := range frames {
+		caf.Write(frame)
+	}
 
-	packetSize := cafVariableInteger(uint64(len(frame)))
 	caf.WriteString("pakt")
-	_ = binary.Write(&caf, binary.BigEndian, uint64(24+len(packetSize)))
-	_ = binary.Write(&caf, binary.BigEndian, uint64(1))
-	_ = binary.Write(&caf, binary.BigEndian, uint64(alacScreenFrameSamples))
+	_ = binary.Write(&caf, binary.BigEndian, uint64(packetTableLength))
+	_ = binary.Write(&caf, binary.BigEndian, uint64(len(frames)))
+	_ = binary.Write(&caf, binary.BigEndian, uint64(len(frames)*alacScreenFrameSamples))
 	_ = binary.Write(&caf, binary.BigEndian, uint32(0))
 	_ = binary.Write(&caf, binary.BigEndian, uint32(0))
-	caf.Write(packetSize)
+	for _, frame := range frames {
+		caf.Write(cafVariableInteger(uint64(len(frame))))
+	}
 	return caf.Bytes()
 }
 
