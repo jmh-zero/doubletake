@@ -377,6 +377,7 @@ func main() {
 
 	var capture *airplay.ScreenCapture
 	var broadcast *airplay.BroadcastCapture
+	var videoSink *airplay.BroadcastSink
 	var broadcastDone chan error
 	startedWidth, startedHeight := -1, -1
 	startedCodec := airplay.VideoCodec("")
@@ -422,10 +423,15 @@ func main() {
 			}
 			log.Printf("[CAPTURE] production HEVC timing requires at least %v video lead", liveVideoLead)
 		}
-		activeBroadcast := airplay.NewBroadcastCaptureWithFrameRate(startedCapture, *fps)
+		activeBroadcast, activeVideoSink, sinkErr := airplay.NewSingleTargetBroadcastCaptureWithFrameRate(startedCapture, *fps)
+		if sinkErr != nil {
+			startedCapture.Stop()
+			return airplay.VideoPreparationResult{}, fmt.Errorf("reserve video capture: %w", sinkErr)
+		}
 		done := make(chan error, 1)
 		capture = startedCapture
 		broadcast = activeBroadcast
+		videoSink = activeVideoSink
 		broadcastDone = done
 		startedWidth, startedHeight = width, height
 		startedCodec = codec
@@ -465,7 +471,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("mirror setup failed: %v", err)
 	}
-	if capture == nil || broadcast == nil {
+	if capture == nil || broadcast == nil || videoSink == nil {
 		log.Fatal("mirror setup completed without preparing video capture")
 	}
 	defer session.Close()
@@ -495,10 +501,6 @@ func main() {
 		log.Println("audio disabled (receiver did not provide audio ports)")
 	}
 
-	videoSink, err := broadcast.AddBackpressuredSink()
-	if err != nil {
-		log.Fatalf("attach single-target video capture: %v", err)
-	}
 	defer videoSink.Close()
 	if err := session.StreamFrames(ctx, videoSink.AsCapture(), 0*time.Second); err != nil && ctx.Err() == nil {
 		log.Printf("streaming error: %v", err)
