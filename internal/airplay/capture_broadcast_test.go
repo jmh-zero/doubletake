@@ -355,48 +355,48 @@ func TestBackpressuredTimestampedBroadcastHandoff(t *testing.T) {
 	}
 }
 
-func TestSingleTargetBroadcastRetainsStartupBeforeReaderStarts(t *testing.T) {
-	base := time.Now()
-	frames := []VideoAccessUnit{
-		{AnnexB: []byte("config-and-idr"), PTS: base},
-		{AnnexB: []byte("following-frame"), PTS: base.Add(time.Second / 30)},
-	}
+func TestTimestampedBroadcastDrainsCaptureBeforeLateSinkAttaches(t *testing.T) {
+	frames := make(chan VideoAccessUnit)
 	capture := &ScreenCapture{
-		frames: &sliceVideoAccessUnitReader{frames: frames},
+		frames: &channelVideoAccessUnitReader{frames: frames},
 		waitCh: make(chan struct{}),
 	}
-	broadcast, sink, err := NewSingleTargetBroadcastCaptureWithFrameRate(capture, 30)
-	if err != nil {
-		t.Fatalf("create single-target broadcast: %v", err)
-	}
-	defer sink.Close()
+	broadcast := NewBroadcastCaptureWithFrameRate(capture, 30)
 	runDone := make(chan error, 1)
 	go func() { runDone <- broadcast.Run() }()
 
-	// Session setup may take longer than capture startup. The first validated
-	// access unit must remain queued while the producer waits to hand off the
-	// following unit.
-	waitForBroadcastSinkState(t, sink, func(s *BroadcastSink) bool {
-		return len(s.frameQueue) == 1 && bytes.Equal(s.frameQueue[0].AnnexB, frames[0].AnnexB)
-	}, "startup access unit retained")
-	waitForBlockedBroadcastProducer(t, sink)
-
-	for i, want := range frames {
-		got, readErr := sink.ReadVideoAccessUnit()
-		if readErr != nil || !bytes.Equal(got.AnnexB, want.AnnexB) || !got.PTS.Equal(want.PTS) {
-			t.Fatalf("startup frame %d = %+v, %v; want %+v", i, got, readErr, want)
+	// Frames produced during receiver setup must be consumed without blocking the
+	// capture pipeline. A sink attached afterward begins on the next access unit.
+	for i := byte(1); i <= 3; i++ {
+		select {
+		case frames <- VideoAccessUnit{AnnexB: []byte{i}}:
+		case <-time.After(time.Second):
+			t.Fatalf("startup frame %d was not drained", i)
 		}
 	}
-	if _, readErr := sink.ReadVideoAccessUnit(); !errors.Is(readErr, io.EOF) {
-		t.Fatalf("read after startup sequence = %v, want EOF", readErr)
+
+	sink, err := broadcast.AddBackpressuredSink()
+	if err != nil {
+		t.Fatalf("attach backpressured sink: %v", err)
 	}
+	defer sink.Close()
+	// Run may already have reserved the read which was pending at registration;
+	// a newly attached sink starts with the following source read.
+	frames <- VideoAccessUnit{AnnexB: []byte("already-pending")}
+	want := VideoAccessUnit{AnnexB: []byte{4}, PTS: time.Now()}
+	frames <- want
+	got, readErr := sink.ReadVideoAccessUnit()
+	if readErr != nil || !bytes.Equal(got.AnnexB, want.AnnexB) || !got.PTS.Equal(want.PTS) {
+		t.Fatalf("first post-setup frame = %+v, %v; want %+v", got, readErr, want)
+	}
+	close(frames)
 	select {
 	case runErr := <-runDone:
 		if !errors.Is(runErr, io.EOF) {
-			t.Fatalf("single-target broadcast run = %v, want EOF", runErr)
+			t.Fatalf("late-sink broadcast run = %v, want EOF", runErr)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("single-target broadcast did not finish")
+		t.Fatal("late-sink broadcast did not finish")
 	}
 }
 

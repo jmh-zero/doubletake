@@ -149,19 +149,6 @@ func NewBroadcastCaptureWithFrameRate(src *ScreenCapture, fps int) *BroadcastCap
 	}
 }
 
-// NewSingleTargetBroadcastCaptureWithFrameRate wraps src and reserves its
-// backpressured sink before Run can consume any startup data. Callers should
-// use this constructor when one receiver owns the capture and may not begin
-// reading until its media session has finished setup.
-func NewSingleTargetBroadcastCaptureWithFrameRate(src *ScreenCapture, fps int) (*BroadcastCapture, *BroadcastSink, error) {
-	bc := NewBroadcastCaptureWithFrameRate(src, fps)
-	sink, err := bc.AddBackpressuredSink()
-	if err != nil {
-		return nil, nil, err
-	}
-	return bc, sink, nil
-}
-
 // AddSink registers a shared fan-out reader before or while Run is active. A
 // capture reserved by AddBackpressuredSink rejects later shared readers by
 // returning an already-finished sink, preserving the no-cross-target-stall
