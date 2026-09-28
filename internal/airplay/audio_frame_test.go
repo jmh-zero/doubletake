@@ -57,48 +57,43 @@ func TestPulseMonitorSourceRequestsBoundedLatency(t *testing.T) {
 	}
 }
 
-func TestPipeWireMonitorSourceTargetsDefaultSinkSerial(t *testing.T) {
-	args := strings.Join(pipeWireMonitorSourceArgs("13067"), " ")
-	for _, want := range []string{
-		"pipewiresrc",
-		"target-object=13067",
-		"client-name=doubletake",
-	} {
-		if !strings.Contains(args, want) {
-			t.Fatalf("PipeWire monitor source %q does not contain %q", args, want)
-		}
-	}
-}
-
-func TestPulseSinkTargetFromList(t *testing.T) {
-	list := "11331\talsa_output.pci-0000_00_1f.3.analog-stereo\tPipeWire\ts32le 2ch 48000Hz\tRUNNING\n" +
-		"13067\tdoubletake_test\tPipeWire\tfloat32le 2ch 48000Hz\tIDLE\n"
-	if got := pulseSinkTargetFromList(list, "doubletake_test"); got != "13067" {
-		t.Fatalf("sink target = %q, want 13067", got)
-	}
-	for _, sink := range []string{"missing", ""} {
-		if got := pulseSinkTargetFromList(list, sink); got != "" {
-			t.Fatalf("sink target for %q = %q, want empty", sink, got)
-		}
-	}
-	if got := pulseSinkTargetFromList("not-a-number\tdoubletake_test\n", "doubletake_test"); got != "" {
-		t.Fatalf("invalid sink target = %q, want empty", got)
-	}
-}
-
-func TestPulseInfoDetectsPipeWireServer(t *testing.T) {
+func TestAudioMonitorSourceSelection(t *testing.T) {
 	for _, test := range []struct {
-		name string
-		info string
-		want bool
+		name        string
+		hasPulse    bool
+		monitor     string
+		hasPipeWire bool
+		wantSource  string
+		wantArgs    []string
 	}{
-		{name: "PipeWire", info: "Server String: /run/user/1000/pulse/native\nServer Name: PulseAudio (on PipeWire 1.6.8)\n", want: true},
-		{name: "native PulseAudio", info: "Server Name: pulseaudio\n", want: false},
-		{name: "unrelated PipeWire text", info: "Comment: PipeWire\nServer Name: pulseaudio\n", want: false},
+		{
+			name: "Pulse monitor preferred when both plugins exist", hasPulse: true,
+			monitor: "test.monitor", hasPipeWire: true, wantSource: "pulse",
+			wantArgs: []string{"pulsesrc", "device=test.monitor", "buffer-time=10000", "latency-time=10000"},
+		},
+		{
+			name: "native Pulse monitor", hasPulse: true,
+			monitor: "test.monitor", wantSource: "pulse",
+			wantArgs: []string{"pulsesrc", "device=test.monitor", "buffer-time=10000", "latency-time=10000"},
+		},
+		{
+			name: "PipeWire fallback without Pulse plugin", hasPipeWire: true, wantSource: "pipewire",
+			wantArgs: []string{"pipewiresrc", "client-name=doubletake"},
+		},
+		{
+			name: "PipeWire fallback without detected monitor", hasPulse: true,
+			hasPipeWire: true, wantSource: "pipewire",
+			wantArgs: []string{"pipewiresrc", "client-name=doubletake"},
+		},
+		{name: "no source plugin", wantSource: ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if got := pulseInfoUsesPipeWire(test.info); got != test.want {
-				t.Fatalf("pulseInfoUsesPipeWire() = %t, want %t", got, test.want)
+			args, source := selectAudioMonitorSource(test.hasPulse, test.monitor, test.hasPipeWire)
+			if source != test.wantSource {
+				t.Fatalf("source = %q, want %q", source, test.wantSource)
+			}
+			if got := strings.Join(args, " "); got != strings.Join(test.wantArgs, " ") {
+				t.Fatalf("args = %q, want %q", got, strings.Join(test.wantArgs, " "))
 			}
 		})
 	}

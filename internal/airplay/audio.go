@@ -1,7 +1,6 @@
 package airplay
 
 import (
-	"bufio"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -13,9 +12,7 @@ import (
 	"log"
 	"math"
 	"net"
-	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -127,39 +124,34 @@ func randomRTPTime(reader io.Reader) (uint32, error) {
 
 // AudioCapture manages audio capture via GStreamer and local ALAC encoding.
 type AudioCapture struct {
-	gstCmd           *exec.Cmd
-	pcmPipe          io.ReadCloser
-	pcmFrames        audioPCMFrameReader
-	cancel           context.CancelFunc
-	waitCh           chan struct{}
-	waitErr          error
-	stopped          bool
-	codec            AudioCodec
-	alac             *alacEncoder
-	compactALAC      bool
-	pcmLevelFrames   uint64
-	pcmSamples       uint64
-	pcmClipped       uint64
-	pcmZero          uint64
-	pcmSquared       uint64
-	pcmPeak          int32
-	pcmPrevious      [audioChannels]int32
-	pcmHavePrevious  bool
-	pcmMaxStep       [audioChannels]int32
-	pcmLargeSteps    [audioChannels]uint64
-	pcmSilentFrames  uint64
-	pcmZeroRun       uint64
-	pcmMaxZeroRun    uint64
-	pcmDump          *bufio.Writer
-	pcmDumpFile      *os.File
-	pcmDumpRemaining int64
-	eldMu            sync.Mutex
-	eld              *eldEncoder
+	gstCmd          *exec.Cmd
+	pcmPipe         io.ReadCloser
+	pcmFrames       audioPCMFrameReader
+	cancel          context.CancelFunc
+	waitCh          chan struct{}
+	waitErr         error
+	stopped         bool
+	codec           AudioCodec
+	alac            *alacEncoder
+	compactALAC     bool
+	pcmLevelFrames  uint64
+	pcmSamples      uint64
+	pcmClipped      uint64
+	pcmZero         uint64
+	pcmSquared      uint64
+	pcmPeak         int32
+	pcmPrevious     [audioChannels]int32
+	pcmHavePrevious bool
+	pcmMaxStep      [audioChannels]int32
+	pcmLargeSteps   [audioChannels]uint64
+	pcmSilentFrames uint64
+	pcmZeroRun      uint64
+	pcmMaxZeroRun   uint64
+	eldMu           sync.Mutex
+	eld             *eldEncoder
 }
 
 var audioTimestampFallbackWarning sync.Once
-
-const debugAudioCaptureSeconds = 30
 
 func supportsTimestampedAudioOutput() bool {
 	for _, element := range []string{"audiobuffersplit", "rtpL16pay", "rtponviftimestamp", "rtpstreampay"} {
@@ -179,53 +171,18 @@ func pulseMonitorSourceArgs(monitor string) []string {
 	}
 }
 
-func pipeWireMonitorSourceArgs(target string) []string {
-	return []string{
-		"pipewiresrc",
-		fmt.Sprintf("target-object=%s", target),
-		"client-name=doubletake",
+func selectAudioMonitorSource(hasPulse bool, monitor string, hasPipeWire bool) ([]string, string) {
+	// Pulse-on-PipeWire keeps a hardware monitor active while its sink is
+	// suspended. That gives the sender silent frames immediately and lets later
+	// playback enter the same stream. A pipewiresrc attached directly to the
+	// suspended sink can remain idle permanently.
+	if hasPulse && monitor != "" {
+		return pulseMonitorSourceArgs(monitor), "pulse"
 	}
-}
-
-func pulseSinkTargetFromList(list, sink string) string {
-	for _, line := range strings.Split(list, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 2 || fields[1] != sink {
-			continue
-		}
-		if _, err := strconv.ParseUint(fields[0], 10, 64); err == nil {
-			return fields[0]
-		}
+	if hasPipeWire {
+		return []string{"pipewiresrc", "client-name=doubletake"}, "pipewire"
 	}
-	return ""
-}
-
-func pipeWireSinkTarget(sink string) string {
-	out, err := exec.Command("pactl", "list", "short", "sinks").Output()
-	if err != nil {
-		dbg("[AUDIO] pactl list short sinks failed: %v", err)
-		return ""
-	}
-	return pulseSinkTargetFromList(string(out), sink)
-}
-
-func pulseInfoUsesPipeWire(info string) bool {
-	for _, line := range strings.Split(info, "\n") {
-		key, value, ok := strings.Cut(line, ":")
-		if ok && strings.EqualFold(strings.TrimSpace(key), "Server Name") {
-			return strings.Contains(strings.ToLower(value), "pipewire")
-		}
-	}
-	return false
-}
-
-func pulseServerUsesPipeWire() bool {
-	out, err := exec.Command("pactl", "info").Output()
-	if err != nil {
-		dbg("[AUDIO] pactl info failed: %v", err)
-		return false
-	}
-	return pulseInfoUsesPipeWire(string(out))
+	return nil, ""
 }
 
 func audioCapturePipelineArgs(srcArgs []string, codec AudioCodec, timestamped bool) []string {
@@ -300,23 +257,19 @@ func StartAudioCapture(ctx context.Context, testTone bool, codec AudioCodec, com
 	} else {
 		hasPipeWireSource := exec.Command("gst-inspect-1.0", "pipewiresrc").Run() == nil
 		hasPulseSource := exec.Command("gst-inspect-1.0", "pulsesrc").Run() == nil
-		monitor := detectPulseMonitor()
-		sink := strings.TrimSuffix(monitor, ".monitor")
-		pipeWireTarget := ""
-		if hasPipeWireSource && sink != "" && pulseServerUsesPipeWire() {
-			pipeWireTarget = pipeWireSinkTarget(sink)
+		monitor := ""
+		if hasPulseSource {
+			monitor = detectPulseMonitor()
 		}
-		if pipeWireTarget != "" {
-			srcArgs = pipeWireMonitorSourceArgs(pipeWireTarget)
-			dbg("[AUDIO] using direct PipeWire monitor for sink=%s target=%s", sink, pipeWireTarget)
-		} else if hasPulseSource && monitor != "" {
-			srcArgs = pulseMonitorSourceArgs(monitor)
+		var source string
+		srcArgs, source = selectAudioMonitorSource(hasPulseSource, monitor, hasPipeWireSource)
+		switch source {
+		case "pulse":
 			dbg("[AUDIO] using pulsesrc device=%s (buffer=%s fragment=%s)",
 				monitor, pulseCaptureBufferTime, pulseCaptureLatencyTime)
-		} else if hasPipeWireSource {
-			srcArgs = []string{"pipewiresrc", "client-name=doubletake"}
+		case "pipewire":
 			dbg("[AUDIO] using default pipewiresrc")
-		} else {
+		default:
 			cancel()
 			return nil, fmt.Errorf("no audio source available (need pulsesrc or pipewiresrc)")
 		}
@@ -327,18 +280,6 @@ func StartAudioCapture(ctx context.Context, testTone bool, codec AudioCodec, com
 		waitCh:      make(chan struct{}),
 		codec:       codec,
 		compactALAC: compactALAC,
-	}
-	if DebugMode() {
-		pcmDumpFile, dumpErr := os.CreateTemp("", "doubletake-audio-capture-*.s16le")
-		if dumpErr != nil {
-			dbg("[AUDIO-CAPTURE] could not create PCM diagnostic: %v", dumpErr)
-		} else {
-			ac.pcmDumpFile = pcmDumpFile
-			ac.pcmDump = bufio.NewWriterSize(pcmDumpFile, 64*1024)
-			ac.pcmDumpRemaining = int64(debugAudioCaptureSeconds * audioSampleRate * audioBytesPerSampleFrame)
-			dbg("[AUDIO-CAPTURE] recording the first %ds of encoder input to %s (stereo S16LE, %d Hz)",
-				debugAudioCaptureSeconds, pcmDumpFile.Name(), audioSampleRate)
-		}
 	}
 	if codec == AudioCodecALAC {
 		if compactALAC {
@@ -351,7 +292,6 @@ func StartAudioCapture(ctx context.Context, testTone bool, codec AudioCodec, com
 		var err error
 		ac.eld, err = newELDEncoder()
 		if err != nil {
-			ac.closeDebugPCM()
 			cancel()
 			return nil, err
 		}
@@ -369,7 +309,6 @@ func StartAudioCapture(ctx context.Context, testTone bool, codec AudioCodec, com
 	gstCmd := exec.CommandContext(captureCtx, "gst-launch-1.0", gstArgs...)
 	gstStdout, err := gstCmd.StdoutPipe()
 	if err != nil {
-		ac.closeDebugPCM()
 		if ac.eld != nil {
 			ac.eld.Close()
 			ac.eld = nil
@@ -381,7 +320,6 @@ func StartAudioCapture(ctx context.Context, testTone bool, codec AudioCodec, com
 
 	waitResult, err := startGStreamerCommand(gstCmd)
 	if err != nil {
-		ac.closeDebugPCM()
 		if ac.eld != nil {
 			ac.eld.Close()
 			ac.eld = nil
@@ -448,8 +386,9 @@ func (ac *AudioCapture) readFramePosition(buf []byte) (int, audioPCMFramePositio
 	if err != nil {
 		return 0, audioPCMFramePosition{}, err
 	}
-	ac.writeDebugPCM(pcm)
-	ac.recordPCMLevels(pcm)
+	if DebugMode() {
+		ac.recordPCMLevels(pcm)
+	}
 	if ac.codec == AudioCodecAACELD {
 		ac.eldMu.Lock()
 		defer ac.eldMu.Unlock()
@@ -467,44 +406,6 @@ func (ac *AudioCapture) readFramePosition(buf []byte) (int, audioPCMFramePositio
 	}
 	n := ac.alac.Encode(buf, pcm)
 	return n, position, nil
-}
-
-func (ac *AudioCapture) writeDebugPCM(pcm []byte) {
-	if ac.pcmDump == nil || ac.pcmDumpRemaining <= 0 {
-		return
-	}
-	if int64(len(pcm)) > ac.pcmDumpRemaining {
-		pcm = pcm[:ac.pcmDumpRemaining]
-	}
-	written, err := ac.pcmDump.Write(pcm)
-	ac.pcmDumpRemaining -= int64(written)
-	if err != nil || written != len(pcm) {
-		if err == nil {
-			err = io.ErrShortWrite
-		}
-		dbg("[AUDIO-CAPTURE] PCM diagnostic write failed: %v", err)
-		ac.closeDebugPCM()
-		return
-	}
-	if ac.pcmDumpRemaining == 0 {
-		dbg("[AUDIO-CAPTURE] PCM diagnostic reached its %ds limit", debugAudioCaptureSeconds)
-		ac.closeDebugPCM()
-	}
-}
-
-func (ac *AudioCapture) closeDebugPCM() {
-	if ac.pcmDump != nil {
-		if err := ac.pcmDump.Flush(); err != nil {
-			dbg("[AUDIO-CAPTURE] PCM diagnostic flush failed: %v", err)
-		}
-		ac.pcmDump = nil
-	}
-	if ac.pcmDumpFile != nil {
-		if err := ac.pcmDumpFile.Close(); err != nil {
-			dbg("[AUDIO-CAPTURE] PCM diagnostic close failed: %v", err)
-		}
-		ac.pcmDumpFile = nil
-	}
 }
 
 func (ac *AudioCapture) recordPCMLevels(pcm []byte) {
@@ -621,7 +522,6 @@ func (ac *AudioCapture) Stop() {
 		return
 	}
 	ac.stopped = true
-	ac.closeDebugPCM()
 	if ac.cancel != nil {
 		ac.cancel()
 	}

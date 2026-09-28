@@ -1,7 +1,6 @@
 package airplay
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/aes"
@@ -11,37 +10,12 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"sync"
 	"testing"
 	"time"
 
 	"golang.org/x/crypto/chacha20poly1305"
 )
-
-func TestDebugPCMWriterStopsAtBound(t *testing.T) {
-	file, err := os.CreateTemp(t.TempDir(), "capture-*.s16le")
-	if err != nil {
-		t.Fatal(err)
-	}
-	path := file.Name()
-	capture := &AudioCapture{
-		pcmDump:          bufio.NewWriter(file),
-		pcmDumpFile:      file,
-		pcmDumpRemaining: 3,
-	}
-	capture.writeDebugPCM([]byte{1, 2, 3, 4})
-	if capture.pcmDump != nil || capture.pcmDumpFile != nil || capture.pcmDumpRemaining != 0 {
-		t.Fatalf("debug capture remained open after its bound: %#v", capture)
-	}
-	got, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, []byte{1, 2, 3}) {
-		t.Fatalf("debug PCM = %v, want first three bytes", got)
-	}
-}
 
 func TestUseAudioRedundancyDefaults(t *testing.T) {
 	if !useAudioRedundancy(AudioCodecALAC) {
