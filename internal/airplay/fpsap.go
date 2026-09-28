@@ -7,9 +7,8 @@ import (
 	"io"
 )
 
-// This m1 capability byte is a bit mask, not the message mode. Apple's sender
-// derives it as 3 with any unavailable capabilities cleared; this
-// implementation supports the full set. The receiver selects mode 0..3 in m2.
+// This m1 capability byte is a bit mask, not the message mode. All available
+// capabilities produce 3; the receiver selects mode 0..3 in m2.
 const fpsapM1Capabilities = byte(3)
 
 var fpsapM1Payload = [...]byte{0x02, 0x00, fpsapM1Capabilities, 0xbb}
@@ -46,12 +45,9 @@ type fpsapSession struct {
 	hasM3     bool
 }
 
-// newFPSAPSession models the stateful lifecycle visible in Apple's
-// sender: one opaque context is created before m1 and reused for m3 and key
-// wrapping. The native implementation fills the local SAP from an
-// arc4random-seeded internal generator, then overwrites its first two bytes with
-// 00 01. Using the caller's cryptographic entropy source for the remaining 126
-// opaque bytes preserves those protocol semantics without porting its PRNG.
+// newFPSAPSession creates one opaque context before m1 and reuses it for m3 and
+// key wrapping. The local SAP begins with 00 01; the caller's cryptographic
+// entropy source fills the remaining 126 opaque bytes.
 func newFPSAPSession(entropy io.Reader) (*fpsapSession, error) {
 	session := &fpsapSession{}
 	session.localSAP[1] = 1

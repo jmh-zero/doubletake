@@ -27,8 +27,7 @@ func (c *AirPlayClient) FairPlaySetup(ctx context.Context) error {
 
 	dbg("[FP] starting FairPlay SAP handshake...")
 
-	// Apple's sender creates one opaque FPSAP context before m1 and retains it
-	// for m3 and encrypted-key creation. Keep the equivalent state together for
+	// Keep one opaque FPSAP context for m1, m3, and encrypted-key creation for
 	// the lifetime of this authentication attempt.
 	fpsap, err := newFPSAPSession(rand.Reader)
 	if err != nil {
@@ -88,9 +87,8 @@ func (c *AirPlayClient) FairPlaySetup(ctx context.Context) error {
 	c.fpM3 = make([]byte, len(m3))
 	copy(c.fpM3, m3)
 
-	// Generate the raw audio key and wrap it in the FairPlay ekey record. Apple's
-	// sender API accepts the raw key as input; the receiver performs the inverse
-	// operation using the state established by m3.
+	// Generate the raw audio key and wrap it in the FairPlay ekey record. The
+	// receiver performs the inverse operation using the state established by m3.
 	var fpAesKey [16]byte
 	if _, err := rand.Read(fpAesKey[:]); err != nil {
 		return fmt.Errorf("generate FairPlay audio key: %w", err)

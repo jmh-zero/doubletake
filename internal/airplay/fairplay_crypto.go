@@ -51,8 +51,7 @@ func deriveFairPlayWrappingKey(receiverSAP [128]byte, message []byte) [16]byte {
 	return fairplayWordsBigEndian(state)
 }
 
-// wrapFairPlayKey emits the 72-byte AirPlay v3 record produced by Apple's
-// FairPlay sender:
+// wrapFairPlayKey emits the 72-byte AirPlay v3 encrypted-key record:
 //
 //	[0:16]  FPLY encrypted-key header
 //	[16:32] per-key random mask

@@ -347,17 +347,15 @@ const (
 	FeatureFPSAP25        uint64 = 1 << 14
 	FeatureHomeKitPairing uint64 = 1 << 17
 	FeatureLegacyPairing  uint64 = 1 << 27
-	// Apple's APEndpointDisplayDescription defaulting path uses feature 28 to
-	// select a 1920x1080 display when the receiver omits displays[]; without it,
-	// the legacy default is 1280x720.
+	// Feature 28 selects a 1920x1080 display when the receiver omits displays[];
+	// without it, the legacy default is 1280x720.
 	featureDefaultDisplay1080p uint64 = 1 << 28
 	FeatureSystemPairing       uint64 = 1 << 43
 	FeatureTransientPairing    uint64 = 1 << 48
 	FeatureUDPMirroring        uint64 = 1 << 49
 
-	// Apple defines the CoreUtils mask from bits 38/43/46/48 and identifies
-	// third-party implementations with bits 26/51. Apple's own CoreUtils test
-	// does not subtract the latter; doing so here is an empirical initial-probe
+	// Bits 38/43/46/48 select CoreUtils pairing, while bits 26/51 identify
+	// third-party receivers. Excluding the latter is an empirical initial-probe
 	// choice for receivers which copy the modern bits but implement HKP. The
 	// bounded pairing fallback still lets the wire exchange determine the result.
 	featureThirdPartyReceiverMask = uint64(1<<26 | 1<<51)

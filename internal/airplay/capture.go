@@ -536,9 +536,9 @@ func supportsTimestampedVideoOutputWithProbe(codec VideoCodec, hasElement func(s
 }
 
 // automaticHEVCAvailableWithProbe is deliberately stricter than explicit
-// HEVC selection. Apple's automatic high-resolution gate asks whether the
-// sender has a hardware HEVC-4K path; merely finding x265 is not enough to make
-// 4K software encoding the normal default.
+// HEVC selection. Automatic high-resolution mode requires a hardware HEVC-4K
+// path; merely finding x265 is not enough to make 4K software encoding the
+// normal default.
 func automaticHEVCAvailableWithProbe(hwaccel string, hasElement func(string) bool) bool {
 	if hwaccel == "" {
 		hwaccel = "auto"
@@ -568,12 +568,10 @@ const (
 	liveHEVCProbeFrames            = 20
 	liveHEVCProbeWarmupFrames      = 5
 	// The screen timestamp equation requires capture, encode, transport, and
-	// decoder work to fit inside the presentation lead. Apple's ordinary
-	// virtual-display source also bounds queued
-	// frames to 67 ms. Apple uses that as an upstream drop ceiling, not a decoder
-	// allowance; using the same duration here is Doubletake's conservative
-	// delivery-room heuristic after local source-to-AU age. Never reserve less
-	// than two frame periods at lower rates.
+	// decoder work to fit inside the presentation lead. Bound the upstream frame
+	// queue to 67 ms and use the same duration as a conservative delivery margin
+	// after local source-to-AU age. Never reserve less than two frame periods at
+	// lower rates.
 	ordinaryScreenFrameQueueDuration = 67 * time.Millisecond
 	maximumAutomaticVideoLead        = 500 * time.Millisecond
 	minimumLiveVideoProbeTimeout     = 3 * time.Second
@@ -1045,8 +1043,7 @@ func waylandCapturePlans(encoder encoderResult, hasElement func(string) bool) []
 	// can therefore fall back to a CPU-owned frame without changing the selected
 	// encoder backend. Every other encoder has only its normal system-memory plan.
 	plans = append(plans, waylandCapturePlan{encoder: encoder, mode: waylandPipelineSystemMemory})
-	// Apple programs VSyncRate and defaultFramerate on its virtual display
-	// source (AirPlaySender screenstream_createVirtualDisplayActivationOptions).
+	// Request the target rate from the capture source as well as downstream.
 	// A downstream videorate cap alone never requests PipeWire maxFramerate:
 	// a 60/120 Hz compositor can still capture/convert at full speed and produce
 	// uneven frame selection. Ask the producer for the target rate first.

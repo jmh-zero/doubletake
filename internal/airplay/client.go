@@ -225,12 +225,11 @@ func (i *ReceiverInfo) DisplaySize() (int, int) {
 
 // MirrorSize returns the receiver's nominal screen-mirroring canvas. This is
 // deliberately distinct from MaxVideoSize: current receivers can advertise a
-// 1920x1080 canvas and a 3840x2160 maximum, and Apple's ordinary screen path
-// uses the nominal dimensions unless its separate high-resolution path is
-// selected.
+// 1920x1080 canvas and a 3840x2160 maximum. The ordinary screen path uses the
+// nominal dimensions unless high-resolution mode is selected.
 //
 // Before a media session exists, some receivers omit displays entirely. In
-// that provisional state Apple's endpoint default is selected by feature 28.
+// that provisional state feature 28 selects the 1920x1080 default.
 func (i *ReceiverInfo) MirrorSize() (int, int) {
 	if i == nil {
 		return 0, 0
@@ -250,9 +249,8 @@ func (i *ReceiverInfo) MirrorSize() (int, int) {
 // MaxVideoSize returns the largest encoded frame the receiver says its decoder
 // accepts. Receivers that omit explicit maxima fall back to their display size.
 //
-// Screen receivers often omit display metadata entirely. Apple's sender uses
-// endpoint feature 28 to choose a 1920x1080 default; otherwise it uses the
-// legacy 1280x720 default.
+// Screen receivers often omit display metadata entirely. Feature 28 selects a
+// 1920x1080 default; otherwise the legacy default is 1280x720.
 func (i *ReceiverInfo) MaxVideoSize() (int, int) {
 	if i == nil {
 		return 0, 0

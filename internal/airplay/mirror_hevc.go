@@ -108,9 +108,8 @@ func parseHEVCSPS(sps []byte) (hevcSPSInfo, bool) {
 	return info, true
 }
 
-// buildHEVCSampleDescription serializes the same hvc1 visual sample entry and
-// hvcC decoder configuration that Apple's generic screen codec path copies
-// from its CMVideoFormatDescription.
+// buildHEVCSampleDescription serializes an hvc1 visual sample entry and hvcC
+// decoder configuration from the encoded parameter sets.
 func buildHEVCSampleDescription(vps, sps, pps []byte) ([]byte, error) {
 	info, ok := parseHEVCSPS(sps)
 	if !ok || len(vps) < 2 || hevcNALType(vps) != 32 || len(pps) < 2 || hevcNALType(pps) != 34 {

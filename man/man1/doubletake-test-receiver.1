@@ -24,8 +24,8 @@ model, manufacturer, or an exact feature-mask fingerprint. It selects behavior
 from advertised capabilities, receiver implementation version where necessary,
 and the protocol that actually completes.
 .PP
-The sender always starts with the control-only SETUP sequence shown by Apple's
-sender artifacts. A fixture which explicitly rejects that control shape
+The sender always starts with the control-only SETUP sequence. A fixture which
+explicitly rejects that control shape
 exercises one bounded transition to legacy media-first SETUP. Feature 59 affects
 only the initial audio descriptor: it selects
 .BR streamConnections ;

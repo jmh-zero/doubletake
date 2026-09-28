@@ -71,10 +71,9 @@ func TestFairPlayKeyWrapRejectsInvalidInput(t *testing.T) {
 	}
 }
 
-func TestFairPlayKey25F84MACVector(t *testing.T) {
-	// The m2, m3, mask, raw key, derived context key, and tag were captured at
-	// Apple's 25F84 _U4HBs boundary. This checks the authenticated prefix only;
-	// 25F84 uses a different final key transform from the AirPlay-v3 path.
+func TestFairPlayAlternateMACVector(t *testing.T) {
+	// This vector checks the authenticated prefix only; the alternate path uses
+	// a different final key transform from AirPlay v3.
 	m2 := mustDecodeHexFP("46504c5903010200000000820201cf32a25714b2524f8aa0ad7af164e37bcf4424e200047efc0ad67afcd95ded1c2730bb591b962ed63a9c4ded88ba8fc78de64d91ccfd5c7b56da88e31f5cceafc7431995a01665a54e1939d25b94db64b9e45d8d063e1e6af07e9656162b0efa404275ea5a44d9591c7256b9fbe6513898b80227721988571650942ad946688a")
 	m3 := mustDecodeHexFP("46504c590301030000000098018f1a9c5b9228300aafe0b41f28b66a62a6cd62bf84eb623273dead10b1f034a8d568126faa133f6ad5ab91acda3839817b4d9530b679fee43ac9e950f6e7aaf1381bd2d3d5198a03bf5648890d19234270a3583e4651893be09c6c75463c42e544fec9abc9f7722a2cc254364365ef91ded76b8c00f9674b08920fb9401e4be6d52a33f2f9ed6fadb672be45c3cde5ad94f3fea5b32ee4")
 	rawKeyBytes := mustDecodeHexFP("000102030405060708090a0b0c0d0e0f")
@@ -105,9 +104,9 @@ func TestFairPlayKey25F84MACVector(t *testing.T) {
 	}
 }
 
-func TestCapturedFairPlayKeyDecrypt(t *testing.T) {
-	// This m3/ekey vector and expected output are independently exercised by
-	// the C playfair_decrypt reference implementation.
+func TestFairPlayKeyDecryptVector(t *testing.T) {
+	// This m3/ekey vector and expected output are also exercised by the C
+	// playfair_decrypt path.
 	m3 := mustDecodeHexFP("46504c590301030000000098018f1a9c7d0af257b31f21f5c2d2bc814c032d457835ad0b06250574bbc7ab4a58cca6eead2c911d7f3e1e7ed4c058955dff3d5ceef014387a985bdb34995015e3dfbdacc56047cb926e093b13e9fdb5e1eee317c018bbc87fc5453c7671647da686da3d564875d03f8aea9d60092de06110bc7be0c16f391c369c75344ae47f33acfcf10e63a9b58bfce215e96001c49e4be967c5067f2a")
 	ekey := mustDecodeHexFP("46504c59010201000000003c0000000088e4f82c8178c18b4751ac24b27c0c2a00000010c899dc6965c1081de6a9d966e2ba3e34548cdbc651c322db18dc22f58fe154a60aecee18")
 

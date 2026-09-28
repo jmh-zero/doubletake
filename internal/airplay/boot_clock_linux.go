@@ -9,7 +9,7 @@ import (
 )
 
 // bootRelativeNow returns the system monotonic boot clock, including suspend.
-// AirPlay timing packets and frame timestamps use this domain on Apple senders.
+// AirPlay timing packets and frame timestamps use this domain.
 func bootRelativeNow() time.Duration {
 	var timestamp unix.Timespec
 	if err := unix.ClockGettime(unix.CLOCK_BOOTTIME, &timestamp); err == nil {

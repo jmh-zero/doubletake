@@ -84,9 +84,9 @@ func TestTargetLatencyAutomaticAndClamp(t *testing.T) {
 	}
 }
 
-func TestSamplesFor44k1MatchesSenderTruncation(t *testing.T) {
+func TestSamplesFor44k1TruncatesFractionalSamples(t *testing.T) {
 	if got := samplesFor44k1(85 * time.Millisecond); got != 3748 {
-		t.Fatalf("85ms = %d samples, want artifact-compatible truncation to 3748", got)
+		t.Fatalf("85ms = %d samples, want truncation to 3748", got)
 	}
 }
 

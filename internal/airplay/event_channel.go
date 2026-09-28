@@ -38,8 +38,8 @@ type eventChannel struct {
 
 // newEventChannel constructs the sender side of the receiver's event channel.
 // The event transport intentionally reverses the normal control-channel key
-// direction (Apple marks it localSendsWithReadKey): receiver commands use the
-// Events-Write key and sender responses use the Events-Read key.
+// direction: receiver commands use the Events-Write key and sender responses
+// use the Events-Read key.
 func newEventChannel(conn net.Conn, encrypted bool, sharedSecret []byte) (*eventChannel, error) {
 	if conn == nil {
 		return nil, fmt.Errorf("event connection is nil")

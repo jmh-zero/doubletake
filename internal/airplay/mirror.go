@@ -289,11 +289,10 @@ func (r mirrorSetupRequest) sessionPlist() map[string]interface{} {
 func (r mirrorSetupRequest) controlPlist() map[string]interface{} {
 	request := r.sessionPlist()
 	request["updateSessionRequest"] = false
-	// Apple's sender combines GET /info with the control SETUP because display
-	// metadata may not exist until this request creates the media session. The
-	// receiver returns that ordinary info dictionary under the SETUP response's
-	// "info" key before any media stream is configured. A qualifier is used only
-	// for Apple's separate protected-display-capabilities exchange.
+	// Combine GET /info with the control SETUP because display metadata may not
+	// exist until this request creates the media session. The receiver returns
+	// that ordinary info dictionary under the SETUP response's "info" key before
+	// any media stream is configured.
 	request["combinedGetInfoWithControlSetup"] = true
 	return request
 }
@@ -536,8 +535,8 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		if setupSucceeded {
 			return
 		}
-		// Match Apple's screen-stream cleanup boundary: once SETUP has created
-		// receiver state, release it before closing the local media transports.
+		// Once SETUP has created receiver state, release it before closing the
+		// local media transports.
 		if !controlConnectionUsable {
 			c.closeUnsafeMirrorControlConnection()
 		} else if acceptedSessionURI != "" {
@@ -580,18 +579,18 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 			connectionLatencyHintName(latencyHint), routeInterface, latencies.video, latencies.audio)
 	}
 
-	// Apple's sender prepares the receiver with a control-only SETUP before it
-	// creates media streams. Older protocol implementations can explicitly
-	// reject that control shape; in that case, make exactly one transition to
-	// the legacy media-first sequence. No receiver identity or unrelated feature
-	// bit is used to infer SETUP ordering.
+	// Prepare the receiver with a control-only SETUP before creating media
+	// streams. Older protocol implementations can explicitly reject that control
+	// shape; in that case, make exactly one transition to the legacy media-first
+	// sequence. No receiver identity or unrelated feature bit is used to infer
+	// SETUP ordering.
 	sessionFirstSetup := true
 
 	audioStreamConnectionID := int64(time.Now().UnixNano() & 0x7FFFFFFFFFFFFFFF)
 	selectedAudioCodec := policy.audioCodec
-	// Real Apple senders use streamConnectionID as the RTSP URI path.
-	// Control, audio, RECORD, and SET_PARAMETER share the audio URI; video uses
-	// a separate URI with its own streamConnectionID.
+	// Use streamConnectionID as the RTSP URI path. Control, audio, RECORD, and
+	// SET_PARAMETER share the audio URI; video uses a separate URI with its own
+	// streamConnectionID.
 	audioURI := fmt.Sprintf("rtsp://%s:%d/%d", c.host, c.port, audioStreamConnectionID)
 	audioMode := policy.audioSecurity
 	var audioKey, audioIV, audioChaChaKey []byte
@@ -1172,10 +1171,8 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	// Set up the video cipher. Encrypted pair-verify uses ChaCha20-Poly1305 with
 	// an HKDF-derived key; plaintext pair-verify uses AES-CTR.
 	if encKey != nil && c.encrypted && ((c.PairKeys != nil && len(c.PairKeys.SharedSecret) > 0) || c.fpAesKey != nil) {
-		// ChaCha20-Poly1305 path: HKDF-SHA512 key derivation.
-		// The receiver's _GetDataStreamSecurityKeys calls the FP helper's HKDF method.
-		// The sender side uses PairingSessionDeriveKey via the PairingClient, which
-		// does HKDF with the pair-verify X25519 ECDH shared secret as IKM.
+		// ChaCha20-Poly1305 path: HKDF-SHA512 key derivation with the pair-verify
+		// X25519 ECDH shared secret as IKM.
 		ikm := c.fpAesKey
 		if c.PairKeys != nil && len(c.PairKeys.SharedSecret) > 0 {
 			ikm = c.PairKeys.SharedSecret
@@ -1970,8 +1967,8 @@ func spsDimensions(sps []byte) (width, height int, ok bool) {
 	return w, h, true
 }
 
-// buildAVCCConfig builds an AVCDecoderConfigurationRecord (avcC) from raw SPS and PPS.
-// Includes 4-byte trailer (02 00 00 00) observed in iPhone captures.
+// buildAVCCConfig builds an AVCDecoderConfigurationRecord (avcC) from raw SPS
+// and PPS, including the required 4-byte trailer (02 00 00 00).
 func buildAVCCConfig(sps, pps []byte) []byte {
 	avcCLen := 6 + 2 + len(sps) + 1 + 2 + len(pps)
 	payload := make([]byte, avcCLen+4) // +4 for trailer
@@ -1987,7 +1984,7 @@ func buildAVCCConfig(sps, pps []byte) []byte {
 	payload[off] = 0x01 // numPictureParameterSets = 1
 	binary.BigEndian.PutUint16(payload[off+1:off+3], uint16(len(pps)))
 	copy(payload[off+3:], pps)
-	// 4-byte trailer observed in iPhone captures
+	// 4-byte trailer
 	payload[avcCLen] = 0x02
 	return payload
 }
@@ -2188,10 +2185,10 @@ func deriveVideoKeys(shk []byte, streamConnectionID int64) (key, iv []byte) {
 	return
 }
 
-// generateAudioChaChaKey creates the direct 32-byte RTP audio key Apple publishes in shk.
-// Modern buffered audio does not HKDF-derive this key from the HAP session; the sender
-// generates a fresh random key, creates the audio cryptor from it, and publishes that same
-// value via shk + streamConnectionKeyUseStreamEncryptionKey.
+// generateAudioChaChaKey creates the direct 32-byte RTP audio key published in
+// shk. Modern buffered audio does not HKDF-derive this key from the HAP session;
+// the sender generates a fresh random key, creates the audio cryptor from it,
+// and publishes that same value via shk + streamConnectionKeyUseStreamEncryptionKey.
 func generateAudioChaChaKey(randReader io.Reader) ([]byte, error) {
 	key := make([]byte, chacha20poly1305.KeySize)
 	if _, err := io.ReadFull(randReader, key); err != nil {
@@ -2200,15 +2197,13 @@ func generateAudioChaChaKey(randReader io.Reader) ([]byte, error) {
 	return key, nil
 }
 
-// deriveChaChaKey derives a 32-byte ChaCha20-Poly1305 key using HKDF-SHA512.
-// This matches Apple's _GetDataStreamSecurityKeys / PairingSessionDeriveKey for
+// deriveChaChaKey derives a 32-byte ChaCha20-Poly1305 key using HKDF-SHA512 for
 // mirroring data streams such as encrypted video/control channels, not RTP audio:
 //   - IKM: pair-verify X25519 ECDH shared secret (or raw FP aesKey as fallback)
 //   - Salt: "DataStream-Salt" + decimal(streamConnectionID)
 //   - Info: "DataStream-Output-Encryption-Key" (sender→receiver screen data direction)
 //
-// The receiver's _ScreenSetup derives only "DataStream-Output-Encryption-Key" for screen
-// mirroring — "Output" refers to the sender's output direction.
+// "Output" refers to the sender's output direction.
 func deriveChaChaKey(ikm []byte, streamConnectionID int64) ([]byte, error) {
 	salt := []byte(fmt.Sprintf("DataStream-Salt%d", uint64(streamConnectionID)))
 	info := []byte("DataStream-Output-Encryption-Key")
@@ -2483,12 +2478,10 @@ func ntpTimingResponder(ctx context.Context, conn net.PacketConn) {
 		senderTS := binary.BigEndian.Uint64(buf[24:32])
 		dbg("[NTP] Apple TV transmit timestamp: 0x%016x (sec=%d)", senderTS, senderTS>>32)
 
-		// Build response: echo back with our timestamps.
-		// Use boot-relative time + NTP epoch, matching what real Apple senders do.
-		// UxPlay subtracts the NTP epoch from timing responses (account_for_epoch=true)
-		// but NOT from video frame timestamps (account_for_epoch=false). Video frames
-		// use raw boot-relative time via ntpTimeNow(). By adding the NTP epoch here,
-		// both resolve to the same boot-relative time base after UxPlay's conversion.
+		// Build response: echo back with our timestamps. Timing responses add the
+		// NTP epoch while video frame timestamps use raw boot-relative time. A
+		// receiver subtracts the epoch from the timing response so both resolve to
+		// the same boot-relative time base.
 		reply := make([]byte, 32)
 		copy(reply, buf[:32])
 		reply[0] = 0x80
@@ -2576,7 +2569,7 @@ var appStartTime = time.Now()
 
 // ntpTimeNow returns a 64-bit NTP fixed-point timestamp for mirroring frame headers.
 // Format: upper 32 bits = seconds, lower 32 bits = fractional seconds (1/2^32).
-// Uses boot-relative time (no epoch offset), matching real Apple senders.
+// It uses boot-relative time without an epoch offset.
 //
 // A forward bias is added so that frame timestamps are intentionally ahead of
 // wall-clock boot time. This avoids first-frame base_time edge cases and also
@@ -2601,14 +2594,12 @@ func (s *MirrorSession) frameTimeNow() (timestamp, timelineID uint64) {
 
 // frameTimeAt converts an encoded access unit's original local capture PTS to
 // the receiver's media timeline, then adds this session's negotiated playout
-// lead. Apple's sbpd sender path reads CMSampleBuffer's output presentation
-// timestamp and adds its screen lead before network-clock conversion; an
-// expired PTS therefore cannot be repaired by assigning old content a new
+// lead. An expired PTS cannot be repaired by assigning old content a new
 // output-time timestamp. Plausible late frames keep their original timestamp:
-// dropping an encoded reference picture would invalidate the rest of its GOP,
-// while Apple's receiver records lateness and still enqueues the frame. A false
-// result is reserved for an invalid or unmappable timestamp and terminates the
-// stream rather than silently poisoning the decoder reference chain.
+// dropping an encoded reference picture would invalidate the rest of its GOP.
+// A false result is reserved for an invalid or unmappable timestamp and
+// terminates the stream rather than silently poisoning the decoder reference
+// chain.
 // Only a zero PTS, used by the legacy unframed capture path, intentionally
 // retains the historical output-time fallback. A malformed nonzero PTS is not
 // safe to relabel and is rejected.
@@ -2709,8 +2700,8 @@ func compactTimestamp(d time.Duration) uint64 {
 	return (sec << 32) | frac
 }
 
-// allocateConsecutiveUDPPorts allocates `count` consecutive UDP port numbers.
-// Real Apple AirPlay senders use consecutive ports: timing(N), control(N+1), data(N+2).
+// allocateConsecutiveUDPPorts allocates `count` consecutive UDP port numbers:
+// timing(N), control(N+1), and data(N+2).
 func allocateConsecutiveUDPPorts(count int) ([]net.PacketConn, error) {
 	return allocateConsecutiveUDPPortsInRange(count, 0, 0)
 }
@@ -2771,9 +2762,8 @@ func tryConsecutiveUDP(base, count int) ([]net.PacketConn, bool) {
 }
 
 // ntpBootTimestamp returns a 64-bit NTP fixed-point timestamp using boot-relative
-// time with the NTP epoch (1900-01-01) added. UxPlay subtracts the NTP epoch from
-// timing responses (account_for_epoch=true), yielding the same boot-relative seconds
-// that video frame headers carry via ntpTimeNow(). Apple TV adapts to any time base.
+// time with the NTP epoch (1900-01-01) added. Removing that epoch yields the same
+// boot-relative seconds carried by video frame headers via ntpTimeNow().
 const secondsFrom1900To1970 = 2208988800
 
 func ntpBootTimestamp() uint64 {

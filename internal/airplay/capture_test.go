@@ -127,8 +127,7 @@ func TestRecommendedAutomaticVideoLatencyUsesP95AndDeliveryMargin(t *testing.T) 
 		ages[i] = time.Duration(80+i) * time.Millisecond
 	}
 	got, ok := recommendedAutomaticVideoLatency(ages, 30)
-	// p95 is the nineteenth value (98 ms); reserve the 67 ms delivery-margin
-	// heuristic derived from Apple's upstream source-queue ceiling.
+	// p95 is the nineteenth value (98 ms); reserve the 67 ms delivery margin.
 	if !ok || got != 165*time.Millisecond {
 		t.Fatalf("measured recommendation = (%v, %t), want (165ms, true)", got, ok)
 	}

@@ -30,9 +30,9 @@ type receiverCompatibility struct {
 }
 
 const (
-	// These bit numbers are AirPlay feature indices used by Apple's sender, not
-	// receiver fingerprints. Feature 41 advertises PTP and feature 59 advertises
-	// the streamConnections audio descriptor.
+	// These bit numbers are AirPlay feature indices, not receiver fingerprints.
+	// Feature 41 advertises PTP and feature 59 advertises the streamConnections
+	// audio descriptor.
 	featureAudioFormatPCM44100Stereo    uint   = 18
 	featureAudioFormatALAC44100Stereo   uint   = 19
 	featureAudioFormatAACLC44100Stereo  uint   = 20
@@ -80,8 +80,8 @@ func compatibilityForReceiver(info *ReceiverInfo, encrypted, audioEnabled bool) 
 	}
 
 	// Feature 59 specifies streamConnections. It does not select SETUP order;
-	// the sender starts with Apple's control-first sequence and negotiates a
-	// legacy media-first sequence only after an explicit protocol rejection.
+	// the sender starts control-first and negotiates a legacy media-first
+	// sequence only after an explicit protocol rejection.
 	if info.HasFeature(featureAudioStreamConnectionSetup) {
 		policy.audioConnections = audioLayoutStreamConnections
 	}

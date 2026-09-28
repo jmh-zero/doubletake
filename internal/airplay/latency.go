@@ -16,9 +16,8 @@ const (
 	connectionLatencyNormal connectionLatencyHint = 0
 	connectionLatencyHigh   connectionLatencyHint = 1
 
-	// Apple's ordinary screen path selects separate video and audio leads from
-	// the same semantic connection hint. These are APSScreenLatencyMs and
-	// APSAudioLatencyForScreenMs defaults in the AirPlaySupport artifacts.
+	// The ordinary screen path selects separate video and audio leads from the
+	// same semantic connection hint.
 	defaultVideoLatencyLow    = 40 * time.Millisecond
 	defaultVideoLatencyNormal = 75 * time.Millisecond
 	defaultVideoLatencyHigh   = 100 * time.Millisecond
@@ -117,9 +116,9 @@ func connectionLatencyHintName(hint connectionLatencyHint) string {
 }
 
 // withMinimumVideoLead gives a locally measured capture pipeline enough room
-// while preserving the relative audio/video policy selected by Apple for the
-// connection hint. This is sender scheduling compensation, not a receiver or
-// codec-specific clock offset.
+// while preserving the relative audio/video policy for the connection hint.
+// This is sender scheduling compensation, not a receiver or codec-specific
+// clock offset.
 func (targets screenLatencyTargets) withMinimumVideoLead(minimum time.Duration) screenLatencyTargets {
 	if minimum <= targets.video {
 		return targets
@@ -132,11 +131,10 @@ func (targets screenLatencyTargets) withMinimumVideoLead(minimum time.Duration) 
 
 var targetLatencyNS atomic.Int64
 
-// SetTargetLatency sets the application's explicit joint playout lead. Apple's
-// own screen and audio overrides are independent, but doubletake historically
-// exposed one flag for both; applying the same explicit value preserves that
-// contract without inventing a relationship between Apple's two settings. A
-// non-positive value restores the artifact-derived automatic policy.
+// SetTargetLatency sets the application's explicit joint playout lead. Screen
+// and audio overrides are independent, but doubletake historically exposed one
+// flag for both; applying the same explicit value preserves that contract. A
+// non-positive value restores the automatic policy.
 func SetTargetLatency(d time.Duration) {
 	if d <= 0 {
 		targetLatencyNS.Store(0)
@@ -191,9 +189,9 @@ func targetLatencySamples44k1() uint32 {
 }
 
 func samplesFor44k1(d time.Duration) uint32 {
-	// Apple's sender converts its millisecond latency to the integral SETUP and
-	// RTP-timebase value by truncation. Keep that byte-exact behavior: 85 ms is
-	// 3748.5 samples and is advertised as 3748, not rounded to 3749.
+	// Convert millisecond latency to the integral SETUP and RTP-timebase value by
+	// truncation: 85 ms is 3748.5 samples and is advertised as 3748, not rounded
+	// to 3749.
 	samples := int64(d/time.Second)*44100 + int64(d%time.Second)*44100/int64(time.Second)
 	if samples < 1 {
 		samples = 1

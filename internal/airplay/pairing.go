@@ -71,8 +71,8 @@ const (
 	pairingFlagTransient = 0x00000010 // Bit 4: ephemeral/transient pairing
 )
 
-// X-Apple-HKP pairing types used by current Apple senders. Screen capture has
-// its own system-pairing type and ACL; transient pairing is a separate type.
+// X-Apple-HKP pairing types. Screen capture has its own system-pairing type and
+// ACL; transient pairing is a separate type.
 const (
 	pairingTypeLegacy        = 3
 	pairingTypeTransient     = 4
@@ -106,9 +106,9 @@ func (c *AirPlayClient) PairingProtocol() PairingProtocol {
 
 const defaultPairingClientName = "doubletake device"
 
-// OPACK encoding of {"com.apple.ScreenCapture": true}. Apple includes this
-// access request in pair-setup M5 for X-Apple-HKP type 5, and current receivers
-// reject a screen-capture identity that omits it.
+// OPACK encoding of {"com.apple.ScreenCapture": true}. Pair-setup M5 includes
+// this access request for X-Apple-HKP type 5, and current receivers reject a
+// screen-capture identity that omits it.
 const screenCaptureACL = "\xe1\x57com.apple.ScreenCapture\x01"
 
 // pairingClientName is shown by the receiver while it asks the user to allow
@@ -899,10 +899,9 @@ func nonceBytes(n uint64) []byte {
 //	iv  = SHA-512("Pair-Verify-AES-IV"  || X25519_shared_secret)[:16]
 func (c *AirPlayClient) rawPairVerify(ctx context.Context) error {
 	// X-Apple-PD asks the receiver to apply the pair-verify shared secret to
-	// FairPlay key derivation. Apple's senders advertise it unconditionally, but
-	// observed raw receivers split on feature 27: those advertising the original
-	// legacy-pairing capability require the unmixed key path, while those without
-	// it require PD mixing. Keep this empirical exception capability-based.
+	// FairPlay key derivation. Raw receivers split on feature 27: those advertising
+	// the original legacy-pairing capability require the unmixed key path, while
+	// those without it require PD mixing. Keep this exception capability-based.
 	mixFairPlayKey := c.info == nil || !c.info.SupportsLegacyPairing()
 	var verifyHeaders map[string]string
 	if mixFairPlayKey {

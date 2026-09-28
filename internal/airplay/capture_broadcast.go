@@ -20,7 +20,7 @@ const (
 	broadcastSinkQueueChunks = 4096
 
 	// Shared encoded fan-out needs room for scheduler and transport bursts: a
-	// quarter second of nominal samples, independent of Apple's 67 ms raw-frame
+	// quarter second of nominal samples, independent of the 67 ms raw-frame
 	// queue. Encoded reference pictures cannot be dropped to catch up, so a
 	// sustained backlog disconnects only that receiver instead. Byte and chunk
 	// bounds still cap memory independently; single-target handoff still waits
@@ -411,8 +411,8 @@ func (s *BroadcastSink) frameQueueExceedsLimitsLocked(frame VideoAccessUnit) boo
 // An explicitly single-destination sink waits once one AU is pending, rather
 // than accumulating encoded references which cannot safely be dropped. Shared
 // fan-out is nonblocking and detaches only the sink which exceeds Doubletake's
-// nominal-duration relay budget. Detachment is distinct from Apple's producer
-// admission signal and does not discard individual encoded references.
+// nominal-duration relay budget. Detachment does not discard individual
+// encoded references.
 func (s *BroadcastSink) enqueueFrame(frame VideoAccessUnit) error {
 	if len(frame.AnnexB) == 0 {
 		return nil

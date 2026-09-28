@@ -233,8 +233,8 @@ func TestBroadcastSinkNominalDurationUsesConfiguredFrameRate(t *testing.T) {
 func TestBroadcastSinkRejectsFrameAtExactDurationThreshold(t *testing.T) {
 	sink := newBroadcastSink(nil)
 	defer sink.Close()
-	// Apple's admission check compares the existing queue to the threshold.
-	// Two samples land exactly on 67 ms; equality must reject the next sample.
+	// Admission compares the existing queue to the threshold. Two samples land
+	// exactly on 67 ms; equality must reject the next sample.
 	sink.frameDuration = sink.maxFrameQueueDuration / 2
 	for _, value := range []byte{1, 2} {
 		if err := sink.enqueueFrame(VideoAccessUnit{AnnexB: []byte{value}}); err != nil {

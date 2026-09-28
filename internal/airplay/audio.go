@@ -57,8 +57,8 @@ const (
 	maximumAudioRTPDatagramBytes = 1472
 
 	// AirPlay receivers report missing audio on the control socket with the
-	// classic RTP retransmit request/response payload types. Keep the same
-	// bounded 512-packet history used by Apple's sender-side audio queues.
+	// classic RTP retransmit request/response payload types. Retain a bounded
+	// 512-packet retransmission history.
 	audioRetransmitRequestPayloadType  = 0xd5
 	audioRetransmitResponsePayloadType = 0xd6
 	audioRetransmitHistoryPackets      = 512
@@ -749,7 +749,7 @@ func (s *MirrorSession) setupAudioStream(dataPort, controlPort int, aesKey, aesI
 	spf := uint16(codecSPF)
 	latencySamples := audioLatencySamplesForCodec(ct, latencyOverride)
 
-	// Apple senders use SSRC=0 for mirroring audio RTP.
+	// Mirroring audio RTP uses SSRC=0.
 
 	as := &AudioStream{
 		conn:            dataConn, // separate socket for audio data
@@ -846,9 +846,9 @@ func (as *AudioStream) audioChaChaAAD(header []byte, rtpTime uint32) []byte {
 	case audioChaChaAADRTPHeader:
 		return header
 	case audioChaChaAADTimestampSSRC:
-		// APSTransportMessageGetAudioAADPointer returns the serialized timestamp
-		// and SSRC fields directly: eight bytes beginning two bytes into Apple's
-		// ten-byte audio-data header (the RTP header without V/PT).
+		// The authenticated data consists of the serialized timestamp and SSRC:
+		// eight bytes beginning two bytes into the ten-byte audio-data header
+		// (the RTP header without V/PT).
 		return header[4:12]
 	default:
 		return nil
@@ -1278,8 +1278,8 @@ const (
 
 // audioSendBurstLimiter bounds only catch-up bursts. At normal ALAC/AAC-ELD
 // cadence every source frame arrives outside the five-millisecond window, so it
-// adds no steady-state delay. Apple's real-time audio sender uses the same
-// five-millisecond service cadence and a burst budget whose floor is 12.
+// adds no steady-state delay. Catch-up sends use a five-millisecond service
+// window and a burst budget whose floor is 12.
 type audioSendBurstLimiter struct {
 	windowStart time.Time
 	packets     int
@@ -1444,7 +1444,7 @@ func (s *MirrorSession) StreamAudio(ctx context.Context, capture *AudioCapture, 
 
 videoReady:
 
-	// Apple starts each audio timeline at a random 32-bit RTP epoch. The
+	// Each audio timeline starts at a random 32-bit RTP epoch. The
 	// latency-adjusted TimeAnnounce value is allowed to wrap below that epoch.
 	// No empty header packet is sent before the first real audio frame.
 	nextRtp, err := randomRTPTime(rand.Reader)
@@ -1509,7 +1509,7 @@ videoReady:
 	dbg("[AUDIO] sent initial source clock mapping pts=%v sourceRTP=%d rtp=%d",
 		firstFramePosition.PTS, firstFramePosition.SourceRTP, firstFrameRTP)
 
-	// Apple senders refresh TimeAnnounce once per second.
+	// Refresh TimeAnnounce once per second.
 	workers.Add(1)
 	go func() {
 		defer workers.Done()
@@ -1589,10 +1589,10 @@ videoReady:
 		return audioStream.sendAudioPacketWithPayloadTypeAndNonce(payload, rtpTime, seq, payloadType, reuseNonce)
 	}
 
-	// AirPlaySender's APMessageRingCopyNextBurst walks backward from the next
-	// unsent packet, includes redundancyCount prior packets, then reverses the
-	// array. Match our SETUP redundantAudio=2 with [N-2, N-1, N]; an eight-frame
-	// interleave sends unrelated older packets outside that negotiated window.
+	// Each redundancy group contains the next unsent packet and the negotiated
+	// number of prior packets in chronological order. Match redundantAudio=2
+	// with [N-2, N-1, N]; an eight-frame interleave sends unrelated older packets
+	// outside that negotiated window.
 	const retransmitDepth = audioRedundancyCount + 1
 	type audioFrame struct {
 		payload []byte
