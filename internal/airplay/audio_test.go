@@ -370,11 +370,53 @@ func (r *positionedPCMFramesForTest) ReadPCMFramePosition(dst []byte) (audioPCMF
 	return position, nil
 }
 
+type steadyCapturePhasePCMFramesForTest struct {
+	remaining int
+	sourceRTP uint32
+	spf       uint32
+}
+
+func (r *steadyCapturePhasePCMFramesForTest) ReadPCMFrame(dst []byte) (time.Time, error) {
+	position, err := r.ReadPCMFramePosition(dst)
+	return position.PTS, err
+}
+
+func (r *steadyCapturePhasePCMFramesForTest) ReadPCMFramePosition(dst []byte) (audioPCMFramePosition, error) {
+	if r.remaining == 0 {
+		return audioPCMFramePosition{}, io.EOF
+	}
+	age := 105 * time.Millisecond
+	if r.sourceRTP == 0 {
+		// Let the first frame establish the pacing reservoir before modeling the
+		// stable sound-server capture phase observed after startup.
+		age = 20 * time.Millisecond
+	}
+	position := audioPCMFramePosition{
+		PTS:          time.Now().Add(-age),
+		SourceRTP:    r.sourceRTP,
+		HasSourceRTP: true,
+	}
+	r.sourceRTP += r.spf
+	r.remaining--
+	clear(dst)
+	return position, nil
+}
+
+func TestStreamAudioKeepsSteadyFramesAfterPacingStartup(t *testing.T) {
+	const frames = 6
+	reader := &steadyCapturePhasePCMFramesForTest{remaining: frames, spf: 352}
+	_, packets := streamAudioPacketsForCodecTest(
+		t, "plaintext", reader, frames, AudioCodecALAC, false,
+		samplesFor44k1(170*time.Millisecond),
+	)
+	assertAudioPacketSequences(t, packets, []uint16{1, 1, 2, 1, 2, 3, 2, 3, 4, 3, 4, 5, 4, 5, 6})
+}
+
 func streamAudioPacketsForTest(t *testing.T, security string, frames audioPCMFrameReader, count int, rfc2198 ...bool) (*AudioStream, [][]byte) {
 	return streamAudioPacketsForCodecTest(t, security, frames, count, AudioCodecALAC, len(rfc2198) > 0 && rfc2198[0])
 }
 
-func streamAudioPacketsForCodecTest(t *testing.T, security string, frames audioPCMFrameReader, count int, codec AudioCodec, rfc2198 bool) (*AudioStream, [][]byte) {
+func streamAudioPacketsForCodecTest(t *testing.T, security string, frames audioPCMFrameReader, count int, codec AudioCodec, rfc2198 bool, latencyOverride ...uint32) (*AudioStream, [][]byte) {
 	t.Helper()
 	ctrlConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
 	if err != nil {
@@ -387,11 +429,15 @@ func streamAudioPacketsForCodecTest(t *testing.T, security string, frames audioP
 	}
 	t.Cleanup(func() { ctrlPeer.Close() })
 	dataConn := &recordingPacketConn{}
+	latencySamples := uint32(audioSampleRate)
+	if len(latencyOverride) > 0 {
+		latencySamples = latencyOverride[0]
+	}
 	stream := &AudioStream{
 		conn: dataConn, ctrlConn: ctrlConn, remoteAddr: &netUDPAddrForAudioTest,
 		ctrlAddr: ctrlPeer.LocalAddr().(*net.UDPAddr),
 		// This fixture tests packet order, independent of scheduler latency.
-		ct: byte(codec), latencySamples: audioSampleRate, rfc2198: rfc2198,
+		ct: byte(codec), latencySamples: latencySamples, rfc2198: rfc2198,
 	}
 	_, codecSPF, _, _, _, _ := codec.Info()
 	stream.spf = uint16(codecSPF)

@@ -1412,7 +1412,8 @@ func (s *MirrorSession) StreamAudio(ctx context.Context, capture *AudioCapture, 
 	spf := uint32(audioStream.spf)
 	pacingFrames := audioPacingFramesForLatency(audioStream.latencySamples, spf)
 	pacingDuration := audioSamplesDuration(uint64(spf) * uint64(pacingFrames))
-	pacingSendLead := minimumAudioSendLead + pacingDuration
+	startupSendLead := minimumAudioSendLead + pacingDuration
+	steadySendLead := minimumAudioSendLead + audioSamplesDuration(uint64(spf))
 	dbg("[AUDIO] pacing reservoir: %d frames (%v)", pacingFrames, pacingDuration)
 
 	// Prewarm the capture while waiting for the first presentable video frame.
@@ -1475,7 +1476,7 @@ videoReady:
 			}
 			return fmt.Errorf("audio read first frame: %w", err)
 		}
-		if firstFrameSize > 0 && audioFrameIsStale(firstFramePosition.PTS, time.Now(), audioStream.latencySamples, pacingSendLead) {
+		if firstFrameSize > 0 && audioFrameIsStale(firstFramePosition.PTS, time.Now(), audioStream.latencySamples, startupSendLead) {
 			catchupFrames++
 			if catchupFrames >= maximumInitialCatchupFrames {
 				age := time.Since(firstFramePosition.PTS)
@@ -1649,7 +1650,11 @@ videoReady:
 			framePTS = firstFramePosition.PTS.Add(audioSamplesDuration(uint64(frameCount) * uint64(spf)))
 			framePosition.PTS = framePTS
 		}
-		if !usingFirstFrame && timestampedAudio && audioFrameIsStale(framePTS, time.Now(), audioStream.latencySamples, pacingSendLead) {
+		// The reservoir delay is paid once when the pacer establishes its anchor.
+		// After that, this loop reads at most one codec frame ahead of the next RTP
+		// target. Reserving the full startup duration again can discard every other
+		// frame from a healthy capture source with a stable, higher-buffer phase.
+		if !usingFirstFrame && timestampedAudio && audioFrameIsStale(framePTS, time.Now(), audioStream.latencySamples, steadySendLead) {
 			staleFrames++
 			if staleFrames == 1 || staleFrames%100 == 0 {
 				dbg("[AUDIO] dropping stale source frame %v old (latency=%v, dropped=%d)",
