@@ -964,7 +964,7 @@ func TestSystemWaylandPipelineDetachesBeforeRetention(t *testing.T) {
 	encoder := encoderResult{parts: gstStage{"openh264enc"}, rawFormat: "I420", codec: VideoCodecH264}
 	pipeline := buildSystemWaylandVideoPipeline(3, 42, 30, encoder, 1920, 1080, true)
 	joined := strings.Join(pipeline, " ")
-	for _, forbidden := range []string{"always-copy", "vapostproc", "compositor", "memory:VAMemory"} {
+	for _, forbidden := range []string{"always-copy", "vapostproc", "memory:VAMemory"} {
 		if strings.Contains(joined, forbidden) {
 			t.Errorf("system-memory Wayland pipeline contains %q: %s", forbidden, joined)
 		}
@@ -975,12 +975,13 @@ func TestSystemWaylandPipelineDetachesBeforeRetention(t *testing.T) {
 		"!", "videoconvert", "!", "video/x-raw,format=NV12",
 		"!", "videoscale", "add-borders=true", "!", "video/x-raw,width=1920,height=1080,pixel-aspect-ratio=1/1",
 		"!", "videoconvert", "!", "video/x-raw,format=I420",
-		"!", "videorate", "skip-to-first=true", "!", "video/x-raw,framerate=30/1",
+		"!", "compositor", "force-live=true", "ignore-inactive-pads=true", "background=black",
+		"!", "video/x-raw,format=I420,width=1920,height=1080,pixel-aspect-ratio=1/1,framerate=30/1",
 		"!", "queue", "max-size-buffers=1", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
 		"!", "openh264enc",
 	}
 	if !containsPipelineSequence(pipeline, wantOrder) {
-		t.Fatalf("system conversion must preserve square pixels and own the frame before scaling, cadence, queuing, and encoding:\n%s", joined)
+		t.Fatalf("system conversion must preserve square pixels and own the frame before scaling, live cadence, queuing, and encoding:\n%s", joined)
 	}
 }
 
@@ -988,7 +989,7 @@ func TestVAPostprocPlainRawWaylandPipelineScalesBeforeRetention(t *testing.T) {
 	encoder := encoderResult{parts: gstStage{"nvh265enc"}, rawFormat: "P010_10LE", codec: VideoCodecHEVC}
 	pipeline := buildVAPostprocPlainRawWaylandVideoPipeline(3, 42, 30, encoder, 1920, 1080, true)
 	joined := strings.Join(pipeline, " ")
-	for _, forbidden := range []string{"always-copy", "memory:VAMemory", "videoconvert", "videoscale", "compositor", "width=1536", "height=960"} {
+	for _, forbidden := range []string{"always-copy", "memory:VAMemory", "videoconvert", "videoscale", "width=1536", "height=960"} {
 		if strings.Contains(joined, forbidden) {
 			t.Errorf("VA-to-system Wayland pipeline contains %q: %s", forbidden, joined)
 		}
@@ -998,13 +999,13 @@ func TestVAPostprocPlainRawWaylandPipelineScalesBeforeRetention(t *testing.T) {
 		"!", "video/x-raw(ANY),pixel-aspect-ratio=1/1",
 		"!", "vapostproc", "disable-passthrough=true", "add-borders=true",
 		"!", "video/x-raw,format=P010_10LE,width=1920,height=1080,pixel-aspect-ratio=1/1",
-		"!", "videorate", "skip-to-first=true",
-		"!", "video/x-raw,framerate=30/1",
+		"!", "compositor", "force-live=true", "ignore-inactive-pads=true", "background=black",
+		"!", "video/x-raw,format=P010_10LE,width=1920,height=1080,pixel-aspect-ratio=1/1,framerate=30/1",
 		"!", "queue", "max-size-buffers=1", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
 		"!", "nvh265enc",
 	}
 	if !containsPipelineSequence(pipeline, wantOrder) {
-		t.Fatalf("VA postprocessing must scale and own system memory before cadence, queue, and encoding:\n%s", joined)
+		t.Fatalf("VA postprocessing must scale and own system memory before live cadence, queue, and encoding:\n%s", joined)
 	}
 }
 
@@ -1015,16 +1016,16 @@ func TestVAPostprocPlainRawWaylandPipelineConvertsX265LayoutAfterScale(t *testin
 		"vapostproc", "disable-passthrough=true", "add-borders=true",
 		"!", "video/x-raw,format=P010_10LE,width=1920,height=1080,pixel-aspect-ratio=1/1",
 		"!", "videoconvert", "!", "video/x-raw,format=I420_10LE",
-		"!", "videorate", "skip-to-first=true",
-		"!", "video/x-raw,framerate=30/1",
+		"!", "compositor", "force-live=true", "ignore-inactive-pads=true", "background=black",
+		"!", "video/x-raw,format=I420_10LE,width=1920,height=1080,pixel-aspect-ratio=1/1,framerate=30/1",
 		"!", "queue", "max-size-buffers=1", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
 		"!", "x265enc",
 	}
 	if !containsPipelineSequence(pipeline, wantOrder) {
 		t.Fatalf("x265 layout conversion must run after VA scaling and before retention:\n%s", strings.Join(pipeline, " "))
 	}
-	if strings.Count(strings.Join(pipeline, " "), "width=1920,height=1080") != 1 {
-		t.Fatalf("pipeline must request the receiver canvas exactly once: %s", strings.Join(pipeline, " "))
+	if strings.Count(strings.Join(pipeline, " "), "width=1920,height=1080") != 2 {
+		t.Fatalf("pipeline must scale and pin the live output to the receiver canvas: %s", strings.Join(pipeline, " "))
 	}
 }
 
@@ -1147,11 +1148,44 @@ func TestWaylandPipelineIgnoresPortalCoordinateSize(t *testing.T) {
 			t.Fatalf("pipeline incorrectly constrains pixels from portal coordinates %q: %s", portalDimension, joined)
 		}
 	}
-	if strings.Count(joined, "width=1920,height=1080") != 1 {
-		t.Fatalf("pipeline must fit the negotiated stream to the receiver exactly once: %s", joined)
+	if strings.Count(joined, "width=1920,height=1080") != 2 {
+		t.Fatalf("pipeline must fit and pin the live output to the receiver canvas: %s", joined)
 	}
-	if strings.Contains(joined, "compositor") || !strings.Contains(joined, "keepalive-time=34") {
-		t.Fatalf("idle cadence must come from pipewiresrc keepalive, without compositor: %s", joined)
+	if !strings.Contains(joined, "compositor force-live=true") || !strings.Contains(joined, "keepalive-time=34") {
+		t.Fatalf("idle cadence must retain the copied receiver-sized frame: %s", joined)
+	}
+}
+
+func TestWaylandLiveCadenceContinuesAfterSourceStops(t *testing.T) {
+	if _, err := exec.LookPath("gst-launch-1.0"); err != nil {
+		t.Skip("gst-launch-1.0 is unavailable")
+	}
+	for _, element := range []string{"videotestsrc", "identity", "compositor", "fakesink"} {
+		if !hasGstElement(element) {
+			t.Skipf("GStreamer element %s is unavailable", element)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	args := []string{
+		"-v", "videotestsrc", "is-live=true", "num-buffers=1",
+		"!", "identity", "sleep-time=500000",
+		"!", "video/x-raw,format=I420,width=640,height=360,framerate=30/1",
+	}
+	for _, stage := range waylandLiveCadenceStages("I420", 320, 240, 30) {
+		args = appendGstStage(args, stage)
+	}
+	// Receiving ten buffers proves that the live stage generated nine more
+	// frames after the finite source stopped publishing.
+	args = appendGstStage(args, gstStage{"fakesink", "sync=false", "num-buffers=10"})
+	output, err := exec.CommandContext(ctx, "gst-launch-1.0", args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("live cadence pipeline failed: %v\n%s", err, output)
+	}
+	wantCaps := "GstCompositor:compositor0.GstAggregatorPad:src: caps = video/x-raw, format=(string)I420, width=(int)320, height=(int)240"
+	if !bytes.Contains(output, []byte(wantCaps)) {
+		t.Fatalf("live compositor did not negotiate its pinned output canvas:\n%s", output)
 	}
 }
 

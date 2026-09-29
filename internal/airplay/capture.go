@@ -896,6 +896,25 @@ func waylandFramePacingStage() gstStage {
 	return gstStage{"videorate", "skip-to-first=true"}
 }
 
+// waylandLiveCadenceStages keeps the last owned, scaled frame moving at the
+// receiver cadence. PipeWire may stop publishing buffers for an undamaged
+// desktop, and pipewiresrc keepalives are not reliable across all portal and
+// PipeWire combinations. compositor's live aggregation clock continues after
+// the source goes idle without retaining a portal-owned buffer.
+
+func waylandLiveCadenceStages(format string, width, height, fps int) []gstStage {
+	caps := fmt.Sprintf("video/x-raw,format=%s,pixel-aspect-ratio=1/1,framerate=%d/1", format, fps)
+	if width > 1 && height > 1 {
+		caps = fmt.Sprintf(
+			"video/x-raw,format=%s,width=%d,height=%d,pixel-aspect-ratio=1/1,framerate=%d/1",
+			format, width&^1, height&^1, fps)
+	}
+	return []gstStage{
+		{"compositor", "force-live=true", "ignore-inactive-pads=true", "background=black"},
+		{caps},
+	}
+}
+
 func appendGstStage(args []string, stage gstStage) []string {
 	if len(stage) == 0 {
 		return args
@@ -1081,8 +1100,9 @@ func buildSystemWaylandVideoPipeline(fd int, nodeID uint32, fps int, encoder enc
 	}
 	args = appendGstStage(args, gstStage{"videoconvert"})
 	args = appendGstStage(args, gstStage{fmt.Sprintf("video/x-raw,format=%s", encoder.rawFormat)})
-	args = appendGstStage(args, waylandFramePacingStage())
-	args = appendGstStage(args, frameRateStage(fps))
+	for _, stage := range waylandLiveCadenceStages(encoder.rawFormat, maxWidth, maxHeight, fps) {
+		args = appendGstStage(args, stage)
+	}
 	args = appendGstStage(args, lowLatencyVideoQueueStage())
 	if encoder.needsVulkan {
 		args = appendGstStage(args, gstStage{"vulkanupload"})
@@ -1111,8 +1131,9 @@ func buildVAPostprocPlainRawWaylandVideoPipeline(fd int, nodeID uint32, fps int,
 		args = appendGstStage(args, gstStage{"videoconvert"})
 		args = appendGstStage(args, gstStage{fmt.Sprintf("video/x-raw,format=%s", encoder.rawFormat)})
 	}
-	args = appendGstStage(args, waylandFramePacingStage())
-	args = appendGstStage(args, frameRateStage(fps))
+	for _, stage := range waylandLiveCadenceStages(encoder.rawFormat, maxWidth, maxHeight, fps) {
+		args = appendGstStage(args, stage)
+	}
 	args = appendGstStage(args, lowLatencyVideoQueueStage())
 	if encoder.needsVulkan {
 		args = appendGstStage(args, gstStage{"vulkanupload"})
@@ -1294,9 +1315,10 @@ func startWaylandCaptureAttempt(ctx context.Context, cfg CaptureConfig, plan way
 		fps = 30
 	}
 
-	// Capture from the negotiated PipeWire pixel stream. pipewiresrc keepalives
-	// provide fresh timestamps for an idle desktop; downstream videorate caps
-	// that cadence without pinning output to portal compositor coordinates.
+	// Capture from the negotiated PipeWire pixel stream. System-memory plans
+	// copy and fit a frame before a live cadence stage can retain it. The native
+	// VA plan relies on pipewiresrc keepalives because compositor cannot consume
+	// VAMemory without an extra download and upload.
 	const pwFdNum = 3
 	gstArgs := buildWaylandVideoPipelineForPlan(
 		pwFdNum, nodeID, fps, plan, cfg.MaxWidth, cfg.MaxHeight, timestampedOutput)
