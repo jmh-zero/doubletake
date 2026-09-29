@@ -1255,7 +1255,7 @@ const (
 	maximumInitialCatchupFrames = 128
 	audioSendBurstWindow        = 5 * time.Millisecond
 	maximumAudioPacketsPerBurst = 12
-	preferredAudioPacingFrames  = 8
+	maximumAudioPacingFrames    = 1
 )
 
 // audioSendBurstLimiter bounds only catch-up bursts. At normal ALAC/AAC-ELD
@@ -1299,11 +1299,10 @@ func (limiter *audioSendBurstLimiter) wait(ctx context.Context) error {
 	}
 }
 
-// audioPacingFramesForLatency spends only the latency above the low-latency
-// screen target on sender-side staging. This preserves a complete delivery
-// window after the pacer smooths callback batches. The high-latency profile can
-// still hold eight ALAC frames, enough for the 32-60 ms batches observed from a
-// 48 kHz monitor after conversion to 44.1 kHz.
+// audioPacingFramesForLatency keeps at most one codec frame in sender-side
+// staging. RTP timestamps already let the receiver absorb callback batches, and
+// the timestamped capture path presents codec-sized frames. A deeper reservoir
+// only consumes the packet's delivery lead before it reaches the receiver.
 func audioPacingFramesForLatency(latencySamples, frameSamples uint32) uint32 {
 	if frameSamples == 0 {
 		return 0
@@ -1313,8 +1312,8 @@ func audioPacingFramesForLatency(latencySamples, frameSamples uint32) uint32 {
 		return 0
 	}
 	frames := uint32(budget / audioSamplesDuration(uint64(frameSamples)))
-	if frames > preferredAudioPacingFrames {
-		return preferredAudioPacingFrames
+	if frames > maximumAudioPacingFrames {
+		return maximumAudioPacingFrames
 	}
 	return frames
 }

@@ -1207,7 +1207,7 @@ func TestAudioFramePacerSmoothsCaptureBlocksAtRTPCadence(t *testing.T) {
 		// Model six codec frames released by one PipeWire callback every 48 ms.
 		arrivals[frame] = time.Duration(frame/6) * 6 * frameDuration
 	}
-	pacer := audioFramePacer{bufferFrames: preferredAudioPacingFrames}
+	pacer := audioFramePacer{bufferFrames: maximumAudioPacingFrames}
 	lastSend := base
 	for frame, arrival := range arrivals {
 		now := base.Add(arrival)
@@ -1216,7 +1216,7 @@ func TestAudioFramePacerSmoothsCaptureBlocksAtRTPCadence(t *testing.T) {
 		}
 		delay := pacer.reserveDelay(now, firstRTP+uint32(frame)*spf, spf, time.Time{})
 		sentAt := now.Add(delay)
-		want := base.Add(audioSamplesDuration(uint64(spf) * preferredAudioPacingFrames)).
+		want := base.Add(audioSamplesDuration(uint64(spf) * maximumAudioPacingFrames)).
 			Add(audioSamplesDuration(uint64(frame) * uint64(spf)))
 		if !sentAt.Equal(want) {
 			t.Fatalf("frame %d sent at %v, want %v (delay %v)", frame, sentAt.Sub(base), want.Sub(base), delay)
@@ -1230,8 +1230,8 @@ func TestAudioFramePacerHandlesRTPWrap(t *testing.T) {
 	const spf = uint32(352)
 	firstRTP := ^uint32(0) - 100
 	frameDuration := audioSamplesDuration(uint64(spf))
-	pacer := audioFramePacer{bufferFrames: preferredAudioPacingFrames}
-	wantDelay := audioSamplesDuration(uint64(spf) * preferredAudioPacingFrames)
+	pacer := audioFramePacer{bufferFrames: maximumAudioPacingFrames}
+	wantDelay := audioSamplesDuration(uint64(spf) * maximumAudioPacingFrames)
 	if delay := pacer.reserveDelay(base, firstRTP, spf, time.Time{}); delay != wantDelay {
 		t.Fatalf("first frame delay = %v, want %v", delay, wantDelay)
 	}
@@ -1246,11 +1246,11 @@ func TestAudioFramePacerPreservesDeliveryDeadline(t *testing.T) {
 		firstRTP = uint32(1000)
 		spf      = uint32(352)
 	)
-	pacer := audioFramePacer{bufferFrames: preferredAudioPacingFrames}
+	pacer := audioFramePacer{bufferFrames: maximumAudioPacingFrames}
 
-	firstDeadline := base.Add(12 * time.Millisecond)
-	if delay := pacer.reserveDelay(base, firstRTP, spf, firstDeadline); delay != 12*time.Millisecond {
-		t.Fatalf("first frame delay = %v, want deadline delay 12ms", delay)
+	firstDeadline := base.Add(4 * time.Millisecond)
+	if delay := pacer.reserveDelay(base, firstRTP, spf, firstDeadline); delay != 4*time.Millisecond {
+		t.Fatalf("first frame delay = %v, want deadline delay 4ms", delay)
 	}
 
 	frameDuration := audioSamplesDuration(uint64(spf))
@@ -1272,10 +1272,10 @@ func TestAudioPacingFramesRespectLatencyBudget(t *testing.T) {
 		spf     uint32
 		want    uint32
 	}{
-		{name: "high ALAC", latency: defaultAudioLatencyHigh, spf: 352, want: 8},
-		{name: "normal ALAC", latency: defaultAudioLatencyNormal, spf: 352, want: 4},
+		{name: "high ALAC", latency: defaultAudioLatencyHigh, spf: 352, want: 1},
+		{name: "normal ALAC", latency: defaultAudioLatencyNormal, spf: 352, want: 1},
 		{name: "low ALAC", latency: defaultAudioLatencyLow, spf: 352, want: 0},
-		{name: "normal AAC-ELD", latency: defaultAudioLatencyNormal, spf: 480, want: 3},
+		{name: "normal AAC-ELD", latency: defaultAudioLatencyNormal, spf: 480, want: 1},
 		{name: "minimum override", latency: 5 * time.Millisecond, spf: 352, want: 0},
 	} {
 		t.Run(test.name, func(t *testing.T) {
