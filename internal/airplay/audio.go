@@ -133,7 +133,6 @@ type AudioCapture struct {
 	stopped         bool
 	codec           AudioCodec
 	alac            *alacEncoder
-	compactALAC     bool
 	pcmLevelFrames  uint64
 	pcmSamples      uint64
 	pcmClipped      uint64
@@ -240,7 +239,7 @@ func audioCapturePipelineArgs(srcArgs []string, codec AudioCodec, timestamped bo
 // StartAudioCapture launches a pipeline that captures system audio (monitor source)
 // and feeds raw PCM into the encoder negotiated by SETUP. ALAC is built in;
 // AAC-ELD is available in builds made with -tags fdk_aac and libfdk-aac.
-func StartAudioCapture(ctx context.Context, testTone bool, codec AudioCodec, compactALAC bool) (*AudioCapture, error) {
+func StartAudioCapture(ctx context.Context, testTone bool, codec AudioCodec) (*AudioCapture, error) {
 	captureCtx, cancel := context.WithCancel(ctx)
 	if codec != AudioCodecALAC && codec != AudioCodecAACELD {
 		cancel()
@@ -276,18 +275,13 @@ func StartAudioCapture(ctx context.Context, testTone bool, codec AudioCodec, com
 	}
 
 	ac := &AudioCapture{
-		cancel:      cancel,
-		waitCh:      make(chan struct{}),
-		codec:       codec,
-		compactALAC: compactALAC,
+		cancel: cancel,
+		waitCh: make(chan struct{}),
+		codec:  codec,
 	}
 	if codec == AudioCodecALAC {
-		if compactALAC {
-			ac.alac = &alacEncoder{}
-			dbg("[AUDIO] using compact ALAC for RFC 2198 packet redundancy")
-		} else {
-			dbg("[AUDIO] using ALAC escape frames")
-		}
+		ac.alac = &alacEncoder{}
+		dbg("[AUDIO] using compressed ALAC")
 	} else if codec == AudioCodecAACELD {
 		var err error
 		ac.eld, err = newELDEncoder()
@@ -397,9 +391,6 @@ func (ac *AudioCapture) readFramePosition(buf []byte) (int, audioPCMFramePositio
 		}
 		n, err := ac.eld.Encode(pcm, buf)
 		return n, position, err
-	}
-	if !ac.compactALAC {
-		return encodeALACVerbatim(buf, pcm, spf, channels, 16), position, nil
 	}
 	if ac.alac == nil {
 		ac.alac = &alacEncoder{}
@@ -698,15 +689,6 @@ func (s *MirrorSession) AudioCodec() AudioCodec {
 		return AudioCodecALAC
 	}
 	return AudioCodec(s.audioStream.ct)
-}
-
-// UsesCompactALAC reports whether capture should use compressed ALAC frames.
-// RFC 2198 can describe redundant blocks only up to 1023 bytes, so compact
-// frames are required for the negotiated packet history to fit on the wire.
-// Legacy RTP transports continue to use the simpler escape representation.
-func (s *MirrorSession) UsesCompactALAC() bool {
-	return s != nil && s.audioStream != nil && s.audioStream.rfc2198 &&
-		AudioCodec(s.audioStream.ct) == AudioCodecALAC
 }
 
 // setupAudioStream creates the audio RTP stream state.

@@ -61,7 +61,7 @@ func (e *alacEncoder) Encode(out, pcm []byte) int {
 	}
 
 	// Noise can cost more than ALAC's verbatim element. Keep the smaller valid
-	// representation; ordinary audio remains compressed for RFC 2198 framing.
+	// representation while ordinary audio uses the compressed form.
 	const verbatimBytes = (3 + 4 + 12 + 4 + 32 +
 		alacScreenFrameSamples*alacStereoChannels*alacSampleBits + 3 + 7) / 8
 	if encodedBytes >= verbatimBytes {

@@ -249,53 +249,20 @@ func TestALACCompressedStreamDecodesLosslesslyAcrossSilence(t *testing.T) {
 	}
 }
 
-func TestAudioCaptureSelectsALACRepresentationForTransport(t *testing.T) {
+func TestAudioCaptureUsesCompressedALAC(t *testing.T) {
 	pcm := testALACPCM()
-	for _, test := range []struct {
-		name       string
-		compact    bool
-		wantLength int
-	}{
-		{name: "legacy packet redundancy", compact: false, wantLength: 1416},
-		{name: "RFC 2198 compound redundancy", compact: true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			capture := &AudioCapture{
-				pcmPipe:     io.NopCloser(bytes.NewReader(pcm)),
-				waitCh:      make(chan struct{}),
-				codec:       AudioCodecALAC,
-				compactALAC: test.compact,
-			}
-			encoded := make([]byte, 8192)
-			n, _, err := capture.readFramePosition(encoded)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if test.wantLength != 0 && n != test.wantLength {
-				t.Fatalf("encoded length = %d, want %d", n, test.wantLength)
-			}
-			if test.compact && n >= 1024 {
-				t.Fatalf("compact encoded length = %d, want an RFC 2198-compatible block", n)
-			}
-		})
+	capture := &AudioCapture{
+		pcmPipe: io.NopCloser(bytes.NewReader(pcm)),
+		waitCh:  make(chan struct{}),
+		codec:   AudioCodecALAC,
 	}
-}
-
-func TestMirrorSessionUsesCompactALACForRFC2198(t *testing.T) {
-	if (*MirrorSession)(nil).UsesCompactALAC() {
-		t.Fatal("nil session selected compact ALAC")
+	encoded := make([]byte, 8192)
+	n, _, err := capture.readFramePosition(encoded)
+	if err != nil {
+		t.Fatal(err)
 	}
-	legacy := &MirrorSession{audioStream: &AudioStream{}}
-	if legacy.UsesCompactALAC() {
-		t.Fatal("legacy packet redundancy selected compact ALAC")
-	}
-	compound := &MirrorSession{audioStream: &AudioStream{rfc2198: true, ct: byte(AudioCodecALAC)}}
-	if !compound.UsesCompactALAC() {
-		t.Fatal("RFC 2198 ALAC session did not select compact ALAC")
-	}
-	aacELD := &MirrorSession{audioStream: &AudioStream{rfc2198: true, ct: byte(AudioCodecAACELD)}}
-	if aacELD.UsesCompactALAC() {
-		t.Fatal("RFC 2198 AAC-ELD session selected compact ALAC")
+	if n >= 1024 {
+		t.Fatalf("encoded length = %d, want a compressed ALAC packet", n)
 	}
 }
 

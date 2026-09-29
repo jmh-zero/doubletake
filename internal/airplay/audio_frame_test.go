@@ -105,7 +105,7 @@ func TestAudioCaptureTestToneCarriesSourcePTSWithoutHardware(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	capture, err := StartAudioCapture(ctx, true, AudioCodecALAC, true)
+	capture, err := StartAudioCapture(ctx, true, AudioCodecALAC)
 	if err != nil {
 		t.Fatalf("start timestamped test-tone capture: %v", err)
 	}
