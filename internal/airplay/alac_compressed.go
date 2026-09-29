@@ -13,10 +13,11 @@ const (
 	alacSampleBits         = 16
 	alacCodedChannelBits   = alacSampleBits + 1
 
-	alacPredictionOrder = 3
-	alacPredictionShift = 4
-	alacPredictionHalf  = 1 << (alacPredictionShift - 1)
-	alacPredictionScale = 1 << alacPredictionShift
+	alacPredictionShift    = 4
+	alacPredictionHalf     = 1 << (alacPredictionShift - 1)
+	alacPredictionScale    = 1 << alacPredictionShift
+	alacPredictionMinOrder = 1
+	alacPredictionMaxOrder = 4
 
 	alacStereoShift = 2
 
@@ -33,7 +34,9 @@ type alacEncoder struct {
 	pcm       [alacStereoChannels][alacScreenFrameSamples]int32
 	coded     [alacStereoChannels][alacScreenFrameSamples]int32
 	residual  [alacStereoChannels][alacScreenFrameSamples]int32
+	candidate [alacScreenFrameSamples]int32
 	alternate [4096]byte
+	scratch   [4096]byte
 }
 
 func (e *alacEncoder) Encode(out, pcm []byte) int {
@@ -84,8 +87,10 @@ func (e *alacEncoder) encodeStereoMode(out []byte, weight int32) int {
 		e.coded[1][sample] = difference
 	}
 
+	var predictorOrders [alacStereoChannels]int
 	for channel := range e.coded {
-		alacPredictResiduals(e.coded[channel][:], e.residual[channel][:])
+		predictorOrders[channel] = e.selectPredictor(
+			e.coded[channel][:], e.residual[channel][:], alacCodedChannelBits)
 	}
 
 	var writer bitWriter
@@ -97,18 +102,37 @@ func (e *alacEncoder) encodeStereoMode(out []byte, weight int32) int {
 	writer.write(alacScreenFrameSamples, 32)
 	writer.write(alacStereoShift, 8)
 	writer.write(uint32(uint8(int8(weight))), 8)
-	writeALACPredictorHeader(&writer)
-	writeALACPredictorHeader(&writer)
+	writeALACPredictorHeader(&writer, predictorOrders[0])
+	writeALACPredictorHeader(&writer, predictorOrders[1])
 	writeALACEntropyBlock(&writer, e.residual[0][:], alacCodedChannelBits)
 	writeALACEntropyBlock(&writer, e.residual[1][:], alacCodedChannelBits)
 	writer.write(7, 3) // TYPE_END
 	return writer.flush()
 }
 
-func writeALACPredictorHeader(writer *bitWriter) {
+func (e *alacEncoder) selectPredictor(samples, residuals []int32, channelBits uint32) int {
+	bestOrder := alacPredictionMinOrder
+	bestBits := int(^uint(0) >> 1)
+	for order := alacPredictionMinOrder; order <= alacPredictionMaxOrder; order++ {
+		alacPredictResiduals(samples, e.candidate[:], order)
+		var writer bitWriter
+		writer.init(e.scratch[:])
+		writeALACEntropyBlock(&writer, e.candidate[:], channelBits)
+		bits := writer.pos*8 + writer.bitPos + 16 + order*16
+		if bits < bestBits {
+			bestBits = bits
+			bestOrder = order
+			copy(residuals, e.candidate[:])
+		}
+	}
+	return bestOrder
+}
+
+func writeALACPredictorHeader(writer *bitWriter, order int) {
 	writer.write(alacPredictionShift, 8) // mode=0, denominator shift=4
-	writer.write(4<<5|alacPredictionOrder, 8)
-	for _, coefficient := range alacPredictionCoefficients() {
+	writer.write(4<<5|uint32(order), 8)
+	coefficients := alacPredictionCoefficients(order)
+	for _, coefficient := range coefficients[:order] {
 		writer.write(uint32(uint16(coefficient)), 16)
 	}
 }
@@ -116,39 +140,39 @@ func writeALACPredictorHeader(writer *bitWriter) {
 // alacPredictResiduals starts with polynomial extrapolation from recent
 // samples. Its coefficients follow each prediction error using only information
 // carried in the residual stream, so the decoder stays in lockstep.
-func alacPredictResiduals(samples, residuals []int32) {
+func alacPredictResiduals(samples, residuals []int32, order int) {
 	if len(samples) == 0 {
 		return
 	}
 	residuals[0] = samples[0]
-	warmup := min(alacPredictionOrder, len(samples)-1)
+	warmup := min(order, len(samples)-1)
 	for sample := 1; sample <= warmup; sample++ {
 		residuals[sample] = alacNarrowSigned(samples[sample]-samples[sample-1], alacCodedChannelBits)
 	}
-	coefficients := alacPredictionCoefficients()
-	for sample := alacPredictionOrder + 1; sample < len(samples); sample++ {
-		base := samples[sample-alacPredictionOrder-1]
+	coefficients := alacPredictionCoefficients(order)
+	for sample := order + 1; sample < len(samples); sample++ {
+		base := samples[sample-order-1]
 		weightedDifference := int32(0)
-		for tap, coefficient := range coefficients {
+		for tap, coefficient := range coefficients[:order] {
 			weightedDifference += int32(coefficient) * (samples[sample-1-tap] - base)
 		}
 		prediction := base + (weightedDifference+alacPredictionHalf)>>alacPredictionShift
 		error := alacNarrowSigned(samples[sample]-prediction, alacCodedChannelBits)
 		residuals[sample] = error
 		remaining := error
-		for tap := alacPredictionOrder - 1; tap >= 0 && remaining != 0; tap-- {
+		for tap := order - 1; tap >= 0 && remaining != 0; tap-- {
 			difference := base - samples[sample-1-tap]
 			direction := alacSign(difference)
 			if error > 0 {
 				coefficients[tap] -= int16(direction)
-				remaining -= int32(alacPredictionOrder-tap) *
+				remaining -= int32(order-tap) *
 					((direction * difference) >> alacPredictionShift)
 				if remaining <= 0 {
 					break
 				}
 			} else {
 				coefficients[tap] += int16(direction)
-				remaining -= int32(alacPredictionOrder-tap) *
+				remaining -= int32(order-tap) *
 					((-direction * difference) >> alacPredictionShift)
 				if remaining >= 0 {
 					break
@@ -158,12 +182,18 @@ func alacPredictResiduals(samples, residuals []int32) {
 	}
 }
 
-func alacPredictionCoefficients() [alacPredictionOrder]int16 {
-	return [alacPredictionOrder]int16{
-		3 * alacPredictionScale,
-		-3 * alacPredictionScale,
-		alacPredictionScale,
+func alacPredictionCoefficients(order int) [alacPredictionMaxOrder]int16 {
+	var coefficients [alacPredictionMaxOrder]int16
+	combination := 1
+	for tap := 0; tap < order; tap++ {
+		combination = combination * (order - tap) / (tap + 1)
+		coefficient := combination * alacPredictionScale
+		if tap&1 != 0 {
+			coefficient = -coefficient
+		}
+		coefficients[tap] = int16(coefficient)
 	}
+	return coefficients
 }
 
 func alacNarrowSigned(value int32, width uint32) int32 {

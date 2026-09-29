@@ -126,10 +126,13 @@ func TestALACCompressedEncoding(t *testing.T) {
 		if got := reader.readBits(8); got != alacPredictionShift {
 			t.Fatalf("channel %d predictor mode/shift = 0x%x, want 0x%x", channel, got, alacPredictionShift)
 		}
-		if got := reader.readBits(8) & 0x1f; got != alacPredictionOrder {
-			t.Fatalf("channel %d predictor order = %d, want %d", channel, got, alacPredictionOrder)
+		order := int(reader.readBits(8) & 0x1f)
+		if order < alacPredictionMinOrder || order > alacPredictionMaxOrder {
+			t.Fatalf("channel %d predictor order = %d, want %d..%d",
+				channel, order, alacPredictionMinOrder, alacPredictionMaxOrder)
 		}
-		for coefficientIndex, want := range alacPredictionCoefficients() {
+		coefficients := alacPredictionCoefficients(order)
+		for coefficientIndex, want := range coefficients[:order] {
 			if got := int16(reader.readBits(16)); got != want {
 				t.Fatalf("channel %d coefficient %d = %d, want %d", channel, coefficientIndex, got, want)
 			}
@@ -159,9 +162,10 @@ func TestALACCompressedFrameDecodesLosslessly(t *testing.T) {
 	}
 
 	patterns := map[string][]byte{
-		"music":   testALACPCM(),
-		"silence": make([]byte, alacScreenFrameSamples*audioBytesPerSampleFrame),
-		"noise":   testALACNoisePCM(),
+		"music":     testALACPCM(),
+		"transient": testALACTransientPCM(),
+		"silence":   make([]byte, alacScreenFrameSamples*audioBytesPerSampleFrame),
+		"noise":     testALACNoisePCM(),
 	}
 	for name, pcm := range patterns {
 		t.Run(name, func(t *testing.T) {
@@ -188,6 +192,15 @@ func TestALACCompressedFrameDecodesLosslessly(t *testing.T) {
 				t.Fatalf("decoded PCM differs: got %d bytes, want %d", len(decoded), len(pcm))
 			}
 		})
+	}
+}
+
+func TestALACAdaptivePredictionKeepsTransientFramesRFC2198Compatible(t *testing.T) {
+	pcm := testALACTransientPCM()
+	encoded := make([]byte, 4096)
+	n := (&alacEncoder{}).Encode(encoded, pcm)
+	if n > 0x3ff {
+		t.Fatalf("transient ALAC frame is %d bytes; RFC 2198 can describe at most 1023", n)
 	}
 }
 
@@ -285,6 +298,20 @@ func testALACNoisePCM() []byte {
 	for offset := 0; offset < len(pcm); offset += 2 {
 		state = state*1664525 + 1013904223
 		binary.LittleEndian.PutUint16(pcm[offset:], uint16(state>>16))
+	}
+	return pcm
+}
+
+func testALACTransientPCM() []byte {
+	pcm := make([]byte, alacScreenFrameSamples*audioBytesPerSampleFrame)
+	for sampleIndex := 0; sampleIndex < alacScreenFrameSamples; sampleIndex++ {
+		left, right := int16(-20000), int16(10000)
+		if sampleIndex%20 < 10 {
+			left, right = 20000, -10000
+		}
+		offset := sampleIndex * audioBytesPerSampleFrame
+		binary.LittleEndian.PutUint16(pcm[offset:], uint16(left))
+		binary.LittleEndian.PutUint16(pcm[offset+2:], uint16(right))
 	}
 	return pcm
 }
