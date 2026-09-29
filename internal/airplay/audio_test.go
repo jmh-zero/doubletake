@@ -1214,7 +1214,7 @@ func TestAudioFramePacerSmoothsCaptureBlocksAtRTPCadence(t *testing.T) {
 		if now.Before(lastSend) {
 			now = lastSend
 		}
-		delay := pacer.reserveDelay(now, firstRTP+uint32(frame)*spf, spf)
+		delay := pacer.reserveDelay(now, firstRTP+uint32(frame)*spf, spf, time.Time{})
 		sentAt := now.Add(delay)
 		want := base.Add(audioSamplesDuration(uint64(spf) * preferredAudioPacingFrames)).
 			Add(audioSamplesDuration(uint64(frame) * uint64(spf)))
@@ -1232,11 +1232,36 @@ func TestAudioFramePacerHandlesRTPWrap(t *testing.T) {
 	frameDuration := audioSamplesDuration(uint64(spf))
 	pacer := audioFramePacer{bufferFrames: preferredAudioPacingFrames}
 	wantDelay := audioSamplesDuration(uint64(spf) * preferredAudioPacingFrames)
-	if delay := pacer.reserveDelay(base, firstRTP, spf); delay != wantDelay {
+	if delay := pacer.reserveDelay(base, firstRTP, spf, time.Time{}); delay != wantDelay {
 		t.Fatalf("first frame delay = %v, want %v", delay, wantDelay)
 	}
-	if delay := pacer.reserveDelay(base.Add(frameDuration), firstRTP+spf, spf); delay != wantDelay {
+	if delay := pacer.reserveDelay(base.Add(frameDuration), firstRTP+spf, spf, time.Time{}); delay != wantDelay {
 		t.Fatalf("wrapped frame delay = %v, want %v", delay, wantDelay)
+	}
+}
+
+func TestAudioFramePacerPreservesDeliveryDeadline(t *testing.T) {
+	base := time.Unix(1787616000, 0)
+	const (
+		firstRTP = uint32(1000)
+		spf      = uint32(352)
+	)
+	pacer := audioFramePacer{bufferFrames: preferredAudioPacingFrames}
+
+	firstDeadline := base.Add(12 * time.Millisecond)
+	if delay := pacer.reserveDelay(base, firstRTP, spf, firstDeadline); delay != 12*time.Millisecond {
+		t.Fatalf("first frame delay = %v, want deadline delay 12ms", delay)
+	}
+
+	frameDuration := audioSamplesDuration(uint64(spf))
+	secondNow := firstDeadline
+	secondDeadline := firstDeadline.Add(frameDuration)
+	if delay := pacer.reserveDelay(secondNow, firstRTP+spf, spf, secondDeadline); delay != frameDuration {
+		t.Fatalf("second frame delay = %v, want deadline cadence %v", delay, frameDuration)
+	}
+
+	if delay := pacer.reserveDelay(secondDeadline.Add(time.Millisecond), firstRTP+2*spf, spf, secondDeadline); delay != 0 {
+		t.Fatalf("late frame delay = %v, want immediate send", delay)
 	}
 }
 

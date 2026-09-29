@@ -1320,15 +1320,16 @@ func audioPacingFramesForLatency(latencySamples, frameSamples uint32) uint32 {
 }
 
 // audioFramePacer stages codec frames, then releases them at their RTP sample
-// cadence. Its reservoir separates the batched callbacks produced by Linux
-// sound servers from timed network sends.
+// cadence. Its reservoir separates batched capture callbacks from timed network
+// sends, while the per-frame deadline prevents staging from consuming the
+// receiver's delivery window.
 type audioFramePacer struct {
 	anchorRTP    uint32
 	anchorTime   time.Time
 	bufferFrames uint32
 }
 
-func (pacer *audioFramePacer) reserveDelay(now time.Time, rtpTime, frameSamples uint32) time.Duration {
+func (pacer *audioFramePacer) reserveDelay(now time.Time, rtpTime, frameSamples uint32, deadline time.Time) time.Duration {
 	if now.IsZero() || frameSamples == 0 {
 		return 0
 	}
@@ -1337,14 +1338,17 @@ func (pacer *audioFramePacer) reserveDelay(now time.Time, rtpTime, frameSamples 
 		pacer.anchorTime = now.Add(audioSamplesDuration(uint64(frameSamples) * uint64(pacer.bufferFrames)))
 	}
 	target := pacer.anchorTime.Add(audioSamplesDuration(uint64(rtpTime - pacer.anchorRTP)))
+	if !deadline.IsZero() && target.After(deadline) {
+		target = deadline
+	}
 	if delay := target.Sub(now); delay > 0 {
 		return delay
 	}
 	return 0
 }
 
-func (pacer *audioFramePacer) wait(ctx context.Context, rtpTime, frameSamples uint32) error {
-	delay := pacer.reserveDelay(time.Now(), rtpTime, frameSamples)
+func (pacer *audioFramePacer) wait(ctx context.Context, rtpTime, frameSamples uint32, deadline time.Time) error {
+	delay := pacer.reserveDelay(time.Now(), rtpTime, frameSamples, deadline)
 	if delay <= 0 {
 		return nil
 	}
@@ -1673,7 +1677,15 @@ videoReady:
 		copy(payload, frameBuf[:n])
 
 		frameCount++
-		if err := framePacer.wait(ctx, frameRTP, spf); err != nil {
+		pacingDeadline := time.Time{}
+		if timestampedAudio {
+			pacingBudget := audioLatencyDuration(audioStream.latencySamples) - defaultAudioLatencyLow
+			if pacingBudget < 0 {
+				pacingBudget = 0
+			}
+			pacingDeadline = framePTS.Add(pacingBudget)
+		}
+		if err := framePacer.wait(ctx, frameRTP, spf, pacingDeadline); err != nil {
 			return err
 		}
 		redundantFrames := 0
