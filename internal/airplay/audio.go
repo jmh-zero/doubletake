@@ -1256,6 +1256,7 @@ const (
 	audioSendBurstWindow        = 5 * time.Millisecond
 	maximumAudioPacketsPerBurst = 12
 	maximumAudioPacingFrames    = 1
+	audioPacingRebaseThreshold  = 2 * time.Millisecond
 )
 
 // audioSendBurstLimiter bounds only catch-up bursts. At normal ALAC/AAC-ELD
@@ -1326,6 +1327,7 @@ type audioFramePacer struct {
 	anchorRTP    uint32
 	anchorTime   time.Time
 	bufferFrames uint32
+	lastRelease  time.Time
 }
 
 func (pacer *audioFramePacer) reserveDelay(now time.Time, rtpTime, frameSamples uint32, deadline time.Time) time.Duration {
@@ -1337,6 +1339,17 @@ func (pacer *audioFramePacer) reserveDelay(now time.Time, rtpTime, frameSamples 
 		pacer.anchorTime = now.Add(audioSamplesDuration(uint64(frameSamples) * uint64(pacer.bufferFrames)))
 	}
 	target := pacer.anchorTime.Add(audioSamplesDuration(uint64(rtpTime - pacer.anchorRTP)))
+	// A delayed timer must not be followed by a compressed catch-up interval.
+	// Move the remaining schedule forward after a material late release while
+	// ignoring ordinary sub-millisecond timer noise so it cannot accumulate.
+	if !pacer.lastRelease.IsZero() {
+		minimumTarget := pacer.lastRelease.Add(audioSamplesDuration(uint64(frameSamples)))
+		if minimumTarget.After(target.Add(audioPacingRebaseThreshold)) {
+			shift := minimumTarget.Sub(target)
+			pacer.anchorTime = pacer.anchorTime.Add(shift)
+			target = minimumTarget
+		}
+	}
 	if !deadline.IsZero() && target.After(deadline) {
 		target = deadline
 	}
@@ -1349,6 +1362,7 @@ func (pacer *audioFramePacer) reserveDelay(now time.Time, rtpTime, frameSamples 
 func (pacer *audioFramePacer) wait(ctx context.Context, rtpTime, frameSamples uint32, deadline time.Time) error {
 	delay := pacer.reserveDelay(time.Now(), rtpTime, frameSamples, deadline)
 	if delay <= 0 {
+		pacer.lastRelease = time.Now()
 		return nil
 	}
 	timer := time.NewTimer(delay)
@@ -1357,6 +1371,7 @@ func (pacer *audioFramePacer) wait(ctx context.Context, rtpTime, frameSamples ui
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-timer.C:
+		pacer.lastRelease = time.Now()
 		return nil
 	}
 }

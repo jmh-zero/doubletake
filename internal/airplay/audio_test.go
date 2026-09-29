@@ -1265,6 +1265,24 @@ func TestAudioFramePacerPreservesDeliveryDeadline(t *testing.T) {
 	}
 }
 
+func TestAudioFramePacerDoesNotCompressIntervalAfterLateRelease(t *testing.T) {
+	base := time.Unix(1787616000, 0)
+	const (
+		firstRTP = uint32(1000)
+		spf      = uint32(352)
+	)
+	frameDuration := audioSamplesDuration(uint64(spf))
+	pacer := audioFramePacer{bufferFrames: maximumAudioPacingFrames}
+	firstDelay := pacer.reserveDelay(base, firstRTP, spf, time.Time{})
+	firstTarget := base.Add(firstDelay)
+
+	lateRelease := firstTarget.Add(5 * time.Millisecond)
+	pacer.lastRelease = lateRelease
+	if delay := pacer.reserveDelay(lateRelease, firstRTP+spf, spf, time.Time{}); delay != frameDuration {
+		t.Fatalf("post-stall delay = %v, want a complete frame interval %v", delay, frameDuration)
+	}
+}
+
 func TestAudioPacingFramesRespectLatencyBudget(t *testing.T) {
 	for _, test := range []struct {
 		name    string

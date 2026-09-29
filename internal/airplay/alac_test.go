@@ -155,6 +155,39 @@ func TestALACCompressedEncodingAllocatesNoPerFrameMemory(t *testing.T) {
 	}
 }
 
+func TestALACEntropyBitCountMatchesWriter(t *testing.T) {
+	patterns := map[string][]byte{
+		"music":     testALACPCM(),
+		"transient": testALACTransientPCM(),
+		"silence":   make([]byte, alacScreenFrameSamples*audioBytesPerSampleFrame),
+		"noise":     testALACNoisePCM(),
+	}
+	for name, pcm := range patterns {
+		t.Run(name, func(t *testing.T) {
+			for channel := 0; channel < alacStereoChannels; channel++ {
+				samples := make([]int32, alacScreenFrameSamples)
+				for sampleIndex := range samples {
+					offset := sampleIndex*audioBytesPerSampleFrame + channel*audioBytesPerSample
+					samples[sampleIndex] = int32(int16(binary.LittleEndian.Uint16(pcm[offset:])))
+				}
+				residuals := make([]int32, alacScreenFrameSamples)
+				encoded := make([]byte, 4096)
+				for order := alacPredictionMinOrder; order <= alacPredictionMaxOrder; order++ {
+					alacPredictResiduals(samples, residuals, order)
+					var writer bitWriter
+					writer.init(encoded)
+					writeALACEntropyBlock(&writer, residuals, alacCodedChannelBits)
+					writtenBits := writer.pos*8 + writer.bitPos
+					if countedBits := alacEntropyBitCount(residuals, alacCodedChannelBits); countedBits != writtenBits {
+						t.Fatalf("channel %d order %d entropy size = %d bits, writer produced %d",
+							channel, order, countedBits, writtenBits)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestALACCompressedFrameDecodesLosslessly(t *testing.T) {
 	ffmpeg, err := exec.LookPath("ffmpeg")
 	if err != nil {

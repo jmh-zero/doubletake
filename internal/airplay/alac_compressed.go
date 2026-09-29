@@ -36,7 +36,6 @@ type alacEncoder struct {
 	residual  [alacStereoChannels][alacScreenFrameSamples]int32
 	candidate [alacScreenFrameSamples]int32
 	alternate [4096]byte
-	scratch   [4096]byte
 }
 
 func (e *alacEncoder) Encode(out, pcm []byte) int {
@@ -115,10 +114,7 @@ func (e *alacEncoder) selectPredictor(samples, residuals []int32, channelBits ui
 	bestBits := int(^uint(0) >> 1)
 	for order := alacPredictionMinOrder; order <= alacPredictionMaxOrder; order++ {
 		alacPredictResiduals(samples, e.candidate[:], order)
-		var writer bitWriter
-		writer.init(e.scratch[:])
-		writeALACEntropyBlock(&writer, e.candidate[:], channelBits)
-		bits := writer.pos*8 + writer.bitPos + 16 + order*16
+		bits := alacEntropyBitCount(e.candidate[:], channelBits) + 16 + order*16
 		if bits < bestBits {
 			bestBits = bits
 			bestOrder = order
@@ -126,6 +122,63 @@ func (e *alacEncoder) selectPredictor(samples, residuals []int32, channelBits ui
 		}
 	}
 	return bestOrder
+}
+
+// alacEntropyBitCount follows the same Rice state transitions as the writer
+// without serializing every candidate predictor. Only the selected candidate
+// reaches the bit writer, keeping encoding work bounded on the audio send path.
+func alacEntropyBitCount(residuals []int32, channelBits uint32) int {
+	history := uint32(alacHistoryStart)
+	zeroRunAdjustment := uint32(0)
+	encodedBits := 0
+	for sample := 0; sample < len(residuals); {
+		parameter := alacRiceParameter(history)
+		divisor := uint32(1<<parameter) - 1
+		folded := alacFoldSigned(residuals[sample])
+		symbol := folded - zeroRunAdjustment
+		encodedBits += alacEntropyValueBitCount(symbol, divisor, parameter, channelBits, true)
+		sample++
+
+		history = alacHistoryMultiplier*(symbol+zeroRunAdjustment) + history -
+			(alacHistoryMultiplier*history)>>alacHistoryFractionBits
+		if symbol > alacHistoryClamp {
+			history = alacHistoryClamp
+		}
+		zeroRunAdjustment = 0
+
+		if history*4 >= alacHistoryZeroThreshold || sample == len(residuals) {
+			continue
+		}
+		zeroParameter := uint32(bits.LeadingZeros32(history)-24) +
+			(history+16)>>6
+		zeroDivisor := (uint32(1<<zeroParameter) - 1) & (1<<alacRiceLimit - 1)
+		run := uint32(0)
+		for sample < len(residuals) && residuals[sample] == 0 {
+			run++
+			sample++
+		}
+		encodedBits += alacEntropyValueBitCount(run, zeroDivisor, zeroParameter, 16, false)
+		if run < 0xffff {
+			zeroRunAdjustment = 1
+		}
+		history = 0
+	}
+	return encodedBits
+}
+
+func alacEntropyValueBitCount(value, divisor, parameter, escapeBits uint32, omitUnitSuffix bool) int {
+	prefix := value / divisor
+	if prefix >= alacEntropyEscapePrefix {
+		return alacEntropyEscapePrefix + int(escapeBits)
+	}
+	encodedBits := int(prefix) + 1
+	if omitUnitSuffix && parameter == 1 {
+		return encodedBits
+	}
+	if value-prefix*divisor == 0 {
+		return encodedBits + int(parameter) - 1
+	}
+	return encodedBits + int(parameter)
 }
 
 func writeALACPredictorHeader(writer *bitWriter, order int) {
