@@ -17,7 +17,7 @@ type fairPlayRootPlacement uint8
 
 const (
 	fairPlayDescriptorOnly fairPlayRootPlacement = iota
-	fairPlayAllRoots
+	fairPlaySessionRoot
 )
 
 type receiverCompatibility struct {
@@ -66,7 +66,7 @@ func compatibilityForReceiver(info *ReceiverInfo, encrypted, audioEnabled bool) 
 		audioSecurity:    selectAudioSecurityMode(encrypted),
 		audioConnections: audioLayoutControlPort,
 		audioCodec:       audioCodec,
-		fairPlayRoots:    fairPlayAllRoots,
+		fairPlayRoots:    fairPlaySessionRoot,
 	}
 	if encrypted {
 		// An encrypted HAP pair-verify session has a CoreUtils key holder. Stream
@@ -181,10 +181,6 @@ func (p receiverCompatibility) permitsLocalPTPClock() bool {
 	return p.timing == timingProtocolPTP
 }
 
-func (p receiverCompatibility) fairPlayOnControl() bool {
-	return p.fairPlayRoots == fairPlayAllRoots
-}
-
-func (p receiverCompatibility) fairPlayOnStreams() bool {
-	return p.fairPlayRoots == fairPlayAllRoots
+func (p receiverCompatibility) fairPlayOnSessionRoot() bool {
+	return p.fairPlayRoots == fairPlaySessionRoot
 }

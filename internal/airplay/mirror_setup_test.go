@@ -1298,20 +1298,9 @@ func testSetupMirrorAudioSessionNegotiation(t *testing.T, test audioSessionCase)
 						serverErr <- fmt.Errorf("video latencyMs = %d, want %d", got, defaultVideoLatencyNormal/time.Millisecond)
 						return
 					}
-					if test.controlFirst {
-						if len(setup) != 1 {
-							serverErr <- fmt.Errorf("control-first video SETUP keys = %#v, want only streams", setup)
-							return
-						}
-					} else {
-						if got, _ := setup["timingProtocol"].(string); got != timingProtocolNTP {
-							serverErr <- fmt.Errorf("expected timingProtocol NTP in video setup, got %q", got)
-							return
-						}
-						if got := plistInt(setup["timingPort"]); got != timingPort {
-							serverErr <- fmt.Errorf("video timingPort = %d, want audio timingPort %d", got, timingPort)
-							return
-						}
+					if len(setup) != 1 {
+						serverErr <- fmt.Errorf("video SETUP keys = %#v, want only streams", setup)
+						return
 					}
 					respBody, err = plist.Marshal(map[string]interface{}{
 						"streams": []interface{}{

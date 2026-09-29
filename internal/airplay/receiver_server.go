@@ -400,7 +400,7 @@ func receiverProfile(profile ReceiverProfile) (receiverProfileSpec, error) {
 			sourceVersion:          "220.68",
 			features:               uint64(0x527ffee6),
 			pairing:                receiverPairingLegacy,
-			setupOrder:             receiverSetupMediaFirst,
+			setupOrder:             receiverSetupSessionFirst,
 			timingProtocol:         timingProtocolNTP,
 			ntpInitiator:           receiverNTPReceiver,
 			audioCodec:             AudioCodecALAC,
@@ -535,15 +535,18 @@ func (s *ReceiverServer) logf(format string, args ...any) {
 }
 
 type receiverConnection struct {
-	server       *ReceiverServer
-	conn         net.Conn
-	reader       *bufio.Reader
-	pairing      *receiverPairingState
-	fairplay     *receiverFPSAPState
-	hap          *receiverHAPStream
-	media        *receiverMediaSession
-	timingProbed bool
-	sessionState receiverSessionState
+	server            *ReceiverServer
+	conn              net.Conn
+	reader            *bufio.Reader
+	pairing           *receiverPairingState
+	fairplay          *receiverFPSAPState
+	hap               *receiverHAPStream
+	media             *receiverMediaSession
+	timingProbed      bool
+	legacyFairPlayKey [16]byte
+	legacyFairPlayIV  []byte
+	legacyFairPlaySet bool
+	sessionState      receiverSessionState
 }
 
 type receiverSessionState uint8
@@ -968,8 +971,13 @@ func (c *receiverConnection) handleSetup(request receiverRequest) receiverRespon
 	if err := c.ensureMedia(); err != nil {
 		return receiverError(500, err)
 	}
+	if c.server.profile.timingProtocol == timingProtocolNTP &&
+		c.server.profile.ntpInitiator == receiverNTPReceiver && !c.timingProbed &&
+		plistInt(setup["timingPort"]) > 0 {
+		c.probeLegacyTiming(setup)
+	}
 	if kind == receiverSetupVideo {
-		if err := c.configureLegacyVideo(setup, streams[0]); err != nil {
+		if err := c.configureLegacyVideo(streams[0]); err != nil {
 			return receiverError(400, err)
 		}
 	}
@@ -1004,10 +1012,6 @@ func (c *receiverConnection) handleSetup(request receiverRequest) receiverRespon
 	for _, stream := range streams {
 		switch plistInt(stream["type"]) {
 		case 96:
-			if c.server.profile.timingProtocol == timingProtocolNTP &&
-				c.server.profile.ntpInitiator == receiverNTPReceiver && !c.timingProbed {
-				c.probeLegacyTiming(setup)
-			}
 			audio := map[string]any{
 				"type":                     int64(96),
 				"arrivalToRenderLatencyMs": int64(0),
@@ -1066,8 +1070,12 @@ func (c *receiverConnection) validateSetup(setup map[string]any, streams []map[s
 		}
 	} else if kind == receiverSetupControl {
 		return fmt.Errorf("media-first receiver does not accept a control-only SETUP")
-	} else if !hasSession && !synthetic {
-		return fmt.Errorf("media-first SETUP omitted the session descriptor")
+	} else if c.sessionState == receiverSessionInitial {
+		if !hasSession && !synthetic {
+			return fmt.Errorf("media-first SETUP omitted the session descriptor")
+		}
+	} else if hasSession {
+		return fmt.Errorf("media-first stream SETUP repeated the session descriptor")
 	}
 
 	if hasSession {
@@ -1092,13 +1100,27 @@ func (c *receiverConnection) validateSetup(setup map[string]any, streams []map[s
 		}
 	}
 
-	if profile.fairPlayRootKeys && c.fairplay != nil && c.fairplay.complete() {
+	if profile.fairPlayRootKeys && c.fairplay != nil && c.fairplay.complete() && hasSession {
 		if len(plistBytes(setup["ekey"])) == 0 || len(plistBytes(setup["eiv"])) == 0 {
 			return fmt.Errorf("SETUP omitted root FairPlay ekey/eiv")
 		}
-		if kind != receiverSetupVideo && plistInt(setup["et"]) != 32 {
+		if plistInt(setup["et"]) != 32 {
 			return fmt.Errorf("SETUP omitted FairPlay et=32")
 		}
+		rawKey, err := c.fairplay.unwrapKey(plistBytes(setup["ekey"]))
+		if err != nil {
+			return fmt.Errorf("authenticate session FairPlay ekey: %w", err)
+		}
+		rootIV := plistBytes(setup["eiv"])
+		if len(rootIV) != 16 {
+			return fmt.Errorf("session FairPlay eiv length is %d, want 16", len(rootIV))
+		}
+		c.legacyFairPlayKey = rawKey
+		c.legacyFairPlayIV = append(c.legacyFairPlayIV[:0], rootIV...)
+		c.legacyFairPlaySet = true
+	} else if profile.fairPlayRootKeys && !hasSession &&
+		(setup["ekey"] != nil || setup["eiv"] != nil || setup["et"] != nil) {
+		return fmt.Errorf("stream SETUP repeated session FairPlay root fields")
 	}
 
 	if kind != receiverSetupAudio || len(streams) != 1 {
@@ -1259,7 +1281,7 @@ func (c *receiverConnection) ensureMedia() error {
 	return nil
 }
 
-func (c *receiverConnection) configureLegacyVideo(setup map[string]any, stream map[string]any) error {
+func (c *receiverConnection) configureLegacyVideo(stream map[string]any) error {
 	mode := c.server.profile.legacyVideoKey
 	if mode == receiverLegacyVideoNone {
 		return nil
@@ -1270,15 +1292,14 @@ func (c *receiverConnection) configureLegacyVideo(setup map[string]any, stream m
 	if c.fairplay == nil {
 		return fmt.Errorf("legacy AES video requires FairPlay SAP")
 	}
-	rawKey, err := c.fairplay.unwrapKey(plistBytes(setup["ekey"]))
-	if err != nil {
-		return fmt.Errorf("authenticate legacy video ekey: %w", err)
+	if !c.legacyFairPlaySet || len(c.legacyFairPlayIV) != 16 {
+		return fmt.Errorf("legacy video requires session FairPlay root material")
 	}
 	pairKeys, verified := c.pairing.sessionKeys()
 	if !verified {
 		return fmt.Errorf("legacy AES video requires pair-verify keys")
 	}
-	masterKey, err := receiverLegacyVideoMasterKey(mode, rawKey[:], pairKeys.sharedSecret)
+	masterKey, err := receiverLegacyVideoMasterKey(mode, c.legacyFairPlayKey[:], pairKeys.sharedSecret)
 	if err != nil {
 		return err
 	}
@@ -1287,10 +1308,9 @@ func (c *receiverConnection) configureLegacyVideo(setup map[string]any, stream m
 	if len(streamKey) != len(masterKey) || !bytes.Equal(streamKey, masterKey) {
 		return fmt.Errorf("legacy video shk does not match the authenticated FairPlay session key")
 	}
-	rootIV := plistBytes(setup["eiv"])
 	streamIV := plistBytes(stream["shiv"])
-	if len(rootIV) != 16 || len(streamIV) != 16 || !bytes.Equal(rootIV, streamIV) {
-		return fmt.Errorf("legacy video requires matching 16-byte root eiv and stream shiv")
+	if len(streamIV) != 16 || !bytes.Equal(c.legacyFairPlayIV, streamIV) {
+		return fmt.Errorf("legacy video requires stream shiv matching the session FairPlay eiv")
 	}
 	streamConnectionID := plistInt(stream["streamConnectionID"])
 	if streamConnectionID <= 0 {

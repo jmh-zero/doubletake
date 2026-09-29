@@ -69,7 +69,7 @@ func TestFeature59OnlyControlsInitialAudioDescriptorLayout(t *testing.T) {
 		{
 			name:       "plaintext feature 59",
 			info:       &withFeature,
-			wantLayout: audioLayoutStreamConnections, wantRoots: fairPlayAllRoots,
+			wantLayout: audioLayoutStreamConnections, wantRoots: fairPlaySessionRoot,
 		},
 		{
 			name: "encrypted without feature 59",
@@ -78,7 +78,7 @@ func TestFeature59OnlyControlsInitialAudioDescriptorLayout(t *testing.T) {
 		},
 		{
 			name:       "unknown receiver",
-			wantLayout: audioLayoutControlPort, wantRoots: fairPlayAllRoots,
+			wantLayout: audioLayoutControlPort, wantRoots: fairPlaySessionRoot,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {

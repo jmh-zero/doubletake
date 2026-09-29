@@ -32,7 +32,7 @@ func TestReceiverServerEndToEndProfiles(t *testing.T) {
 		{name: "Roku raw negotiates media-first receiver-initiated NTP", profile: ReceiverProfileRoku, wantSetups: 3, wantTiming: 3, wantEvents: 1},
 		{name: "LG HAP negotiates media-first PTP", profile: ReceiverProfileLG, wantEncrypted: true, wantSetups: 3, wantEvents: 1},
 		{name: "AppleTV3 raw negotiates media-first receiver-initiated NTP", profile: ReceiverProfileAppleTV3, wantSetups: 3, wantFairPlay: 2, wantTiming: 3, wantEvents: 1},
-		{name: "UxPlay legacy negotiates media-first without eventPort", profile: ReceiverProfileUxPlay, wantSetups: 3, wantFairPlay: 2, wantTiming: 3},
+		{name: "UxPlay legacy accepts control-first without eventPort", profile: ReceiverProfileUxPlay, wantSetups: 3, wantFairPlay: 2, wantTiming: 3},
 		{name: "AirServer raw control-first with descriptor retry", profile: ReceiverProfileAirServer, wantSetups: 4, wantFairPlay: 2, wantTiming: 3, wantEvents: 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -189,7 +189,7 @@ func TestReceiverProfilePresets(t *testing.T) {
 			receiverSetupMediaFirst, timingProtocolNTP, receiverNTPReceiver, false, false, false, false, false,
 			AudioCodecAACELD, 0x1440800, false, true, receiverLegacyVideoRaw, false, 0, 0, 0, 0, false},
 		{ReceiverProfileUxPlay, "AppleTV3,2", "220.68", 0x527ffee6, receiverPairingLegacy,
-			receiverSetupMediaFirst, timingProtocolNTP, receiverNTPReceiver, false, false, false, false, false,
+			receiverSetupSessionFirst, timingProtocolNTP, receiverNTPReceiver, false, false, false, false, false,
 			AudioCodecALAC, 0x40000, false, true, receiverLegacyVideoMixed, true, 1920, 1080, 0, 0, false},
 		{ReceiverProfileAirServer, "AppleTV5,3", "375.3", 0x3c177fde4a7fdfd5, receiverPairingLegacy,
 			receiverSetupSessionFirst, timingProtocolNTP, receiverNTPSender, false, false, false, true, false,
