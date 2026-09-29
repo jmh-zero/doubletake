@@ -1299,16 +1299,16 @@ func (limiter *audioSendBurstLimiter) wait(ctx context.Context) error {
 	}
 }
 
-// audioPacingFramesForLatency sizes the sender's staging reservoir without
-// consuming the minimum network lead. The high-latency screen profile can hold
-// eight ALAC frames, enough for the 32-60 ms callback batches observed from a
-// 48 kHz PipeWire monitor after conversion to 44.1 kHz. Lower-latency sessions
-// automatically retain fewer frames.
+// audioPacingFramesForLatency spends only the latency above the low-latency
+// screen target on sender-side staging. This preserves a complete delivery
+// window after the pacer smooths callback batches. The high-latency profile can
+// still hold eight ALAC frames, enough for the 32-60 ms batches observed from a
+// 48 kHz monitor after conversion to 44.1 kHz.
 func audioPacingFramesForLatency(latencySamples, frameSamples uint32) uint32 {
 	if frameSamples == 0 {
 		return 0
 	}
-	budget := audioLatencyDuration(latencySamples) - minimumAudioSendLead
+	budget := audioLatencyDuration(latencySamples) - defaultAudioLatencyLow
 	if budget <= 0 {
 		return 0
 	}
