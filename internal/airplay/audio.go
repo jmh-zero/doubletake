@@ -67,14 +67,6 @@ const (
 	// PCM. This queue has no minimum threshold, so it does not add steady-state
 	// latency; source PTS still decides whether a recovered frame is timely.
 	audioCaptureStallBuffer = 250 * time.Millisecond
-
-	// PulseAudio's default source buffer is 200 ms. Pulse-on-PipeWire can then
-	// alternate between one and two graph quanta before releasing a monitor
-	// buffer, leaving too little of the negotiated playout window for network
-	// and scheduler jitter. Limit the source buffer to one requested fragment;
-	// the server may round both values up to its graph quantum.
-	pulseCaptureBufferTime  = 10 * time.Millisecond
-	pulseCaptureLatencyTime = 10 * time.Millisecond
 )
 
 // ErrAACELDUnavailable means this build does not contain the optional FDK-AAC
@@ -161,22 +153,34 @@ func supportsTimestampedAudioOutput() bool {
 	return true
 }
 
-func pulseMonitorSourceArgs(monitor string) []string {
+func audioCaptureFragmentTime(codec AudioCodec) time.Duration {
+	_, codecSPF, _, _, _, _ := codec.Info()
+	// Pulse properties use whole microseconds. Round up so the requested source
+	// callback never contains less than one codec frame.
+	microseconds := (codecSPF*int64(time.Second/time.Microsecond) + audioSampleRate - 1) / audioSampleRate
+	return time.Duration(microseconds) * time.Microsecond
+}
+
+func pulseMonitorSourceArgs(monitor string, codec AudioCodec) []string {
+	fragmentTime := audioCaptureFragmentTime(codec)
 	return []string{
 		"pulsesrc",
 		fmt.Sprintf("device=%s", monitor),
-		fmt.Sprintf("buffer-time=%d", pulseCaptureBufferTime/time.Microsecond),
-		fmt.Sprintf("latency-time=%d", pulseCaptureLatencyTime/time.Microsecond),
+		// Keep the source read granularity at one codec frame, but give the
+		// device-side ring enough capacity to survive a scheduler stall. The
+		// downstream queue cannot preserve samples that pulsesrc has not read.
+		fmt.Sprintf("buffer-time=%d", audioCaptureStallBuffer/time.Microsecond),
+		fmt.Sprintf("latency-time=%d", fragmentTime/time.Microsecond),
 	}
 }
 
-func selectAudioMonitorSource(hasPulse bool, monitor string, hasPipeWire bool) ([]string, string) {
+func selectAudioMonitorSource(hasPulse bool, monitor string, hasPipeWire bool, codec AudioCodec) ([]string, string) {
 	// Pulse-on-PipeWire keeps a hardware monitor active while its sink is
 	// suspended. That gives the sender silent frames immediately and lets later
 	// playback enter the same stream. A pipewiresrc attached directly to the
 	// suspended sink can remain idle permanently.
 	if hasPulse && monitor != "" {
-		return pulseMonitorSourceArgs(monitor), "pulse"
+		return pulseMonitorSourceArgs(monitor, codec), "pulse"
 	}
 	if hasPipeWire {
 		return []string{"pipewiresrc", "client-name=doubletake"}, "pipewire"
@@ -261,11 +265,12 @@ func StartAudioCapture(ctx context.Context, testTone bool, codec AudioCodec) (*A
 			monitor = detectPulseMonitor()
 		}
 		var source string
-		srcArgs, source = selectAudioMonitorSource(hasPulseSource, monitor, hasPipeWireSource)
+		srcArgs, source = selectAudioMonitorSource(hasPulseSource, monitor, hasPipeWireSource, codec)
 		switch source {
 		case "pulse":
+			fragmentTime := audioCaptureFragmentTime(codec)
 			dbg("[AUDIO] using pulsesrc device=%s (buffer=%s fragment=%s)",
-				monitor, pulseCaptureBufferTime, pulseCaptureLatencyTime)
+				monitor, audioCaptureStallBuffer, fragmentTime)
 		case "pipewire":
 			dbg("[AUDIO] using default pipewiresrc")
 		default:
@@ -1171,8 +1176,8 @@ func (as *AudioStream) sendSyncPacket(timingProtocol string, networkTime, timeli
 	return as.sendSyncPacketAt(timingProtocol, networkTime, timelineID, rtpNow, isFirst)
 }
 
-// sendSyncPacketAt publishes an RTP and network-time pair describing the same
-// source-clock instant. Official senders derive both values from one host tick.
+// sendSyncPacketAt maps the latency-adjusted playback position to the network
+// time of a captured source boundary.
 func (as *AudioStream) sendSyncPacketAt(timingProtocol string, networkTime, timelineID uint64, rtpNow uint32, isFirst bool) error {
 	as.mu.Lock()
 	latencySamples := as.latencySamples
@@ -1201,27 +1206,23 @@ func (as *AudioStream) sendSyncPacketAt(timingProtocol string, networkTime, time
 	playheadRTP := rtpNow - latencySamples
 
 	if timingProtocol == timingProtocolPTP {
-		// PTP TimeAnnounce carries the media position at the announced network
-		// time twice: once as rtpTime and once as rtpApply. The sender constructs
-		// both fields from the same audio-clock sample. The negotiated latency is
-		// represented by mapping that playhead behind the captured source frame,
-		// not by deferring application to a later RTP timestamp.
+		// TimeAnnounce carries the same playback RTP value in rtpTime and
+		// rtpApply. The sender constructs both fields from one audio-clock sample.
 		packet[1] = audioSyncPayloadTypePTP
 		binary.BigEndian.PutUint32(packet[4:8], playheadRTP)
 		binary.BigEndian.PutUint64(packet[8:16], ptpNanoseconds(networkTime))
 		binary.BigEndian.PutUint32(packet[16:20], playheadRTP)
 		binary.BigEndian.PutUint64(packet[20:28], timelineID)
 	} else {
-		// Legacy NTP TimeAnnounce uses the same RTP value for rtpTime and
-		// rtpApply around the NTP seconds.32 clock sample.
+		// Legacy NTP TimeAnnounce uses the same RTP value in both fields.
 		packet[1] = audioSyncPayloadTypeNTP
 		binary.BigEndian.PutUint32(packet[4:8], playheadRTP)
 		binary.BigEndian.PutUint64(packet[8:16], networkTime)
 		binary.BigEndian.PutUint32(packet[16:20], playheadRTP)
 	}
 
-	dbg("[AUDIO-SYNC] first=%t sourceRTP=%d playheadRTP=%d latency=%d network=0x%016x timeline=0x%016x",
-		isFirst, rtpNow, playheadRTP, latencySamples, networkTime, timelineID)
+	dbg("[AUDIO-SYNC] first=%t rtp=%d latency=%d network=0x%016x timeline=0x%016x",
+		isFirst, playheadRTP, latencySamples, networkTime, timelineID)
 	_, err := as.ctrlConn.WriteTo(packet, as.ctrlAddr)
 	return err
 }
@@ -1301,9 +1302,8 @@ func (limiter *audioSendBurstLimiter) wait(ctx context.Context) error {
 }
 
 // audioPacingFramesForLatency keeps at most one codec frame in sender-side
-// staging. RTP timestamps already let the receiver absorb callback batches, and
-// the timestamped capture path presents codec-sized frames. A deeper reservoir
-// only consumes the packet's delivery lead before it reaches the receiver.
+// staging for the unframed compatibility path. Timestamped capture is driven by
+// source callbacks and does not use this fallback timer.
 func audioPacingFramesForLatency(latencySamples, frameSamples uint32) uint32 {
 	if frameSamples == 0 {
 		return 0
@@ -1319,10 +1319,9 @@ func audioPacingFramesForLatency(latencySamples, frameSamples uint32) uint32 {
 	return frames
 }
 
-// audioFramePacer stages codec frames, then releases them at their RTP sample
-// cadence. Its reservoir separates batched capture callbacks from timed network
-// sends, while the per-frame deadline prevents staging from consuming the
-// receiver's delivery window.
+// audioFramePacer releases unframed compatibility capture at RTP sample cadence.
+// Timestamped capture already has source callback boundaries and is sent as it
+// arrives so the receiver retains the full negotiated playout window.
 type audioFramePacer struct {
 	anchorRTP    uint32
 	anchorTime   time.Time
@@ -1330,7 +1329,7 @@ type audioFramePacer struct {
 	lastRelease  time.Time
 }
 
-func (pacer *audioFramePacer) reserveDelay(now time.Time, rtpTime, frameSamples uint32, deadline time.Time) time.Duration {
+func (pacer *audioFramePacer) reserveDelay(now time.Time, rtpTime, frameSamples uint32) time.Duration {
 	if now.IsZero() || frameSamples == 0 {
 		return 0
 	}
@@ -1350,17 +1349,14 @@ func (pacer *audioFramePacer) reserveDelay(now time.Time, rtpTime, frameSamples 
 			target = minimumTarget
 		}
 	}
-	if !deadline.IsZero() && target.After(deadline) {
-		target = deadline
-	}
 	if delay := target.Sub(now); delay > 0 {
 		return delay
 	}
 	return 0
 }
 
-func (pacer *audioFramePacer) wait(ctx context.Context, rtpTime, frameSamples uint32, deadline time.Time) error {
-	delay := pacer.reserveDelay(time.Now(), rtpTime, frameSamples, deadline)
+func (pacer *audioFramePacer) wait(ctx context.Context, rtpTime, frameSamples uint32) error {
+	delay := pacer.reserveDelay(time.Now(), rtpTime, frameSamples)
 	if delay <= 0 {
 		pacer.lastRelease = time.Now()
 		return nil
@@ -1410,11 +1406,6 @@ func (s *MirrorSession) StreamAudio(ctx context.Context, capture *AudioCapture, 
 	}()
 
 	spf := uint32(audioStream.spf)
-	pacingFrames := audioPacingFramesForLatency(audioStream.latencySamples, spf)
-	pacingDuration := audioSamplesDuration(uint64(spf) * uint64(pacingFrames))
-	startupSendLead := minimumAudioSendLead + pacingDuration
-	steadySendLead := minimumAudioSendLead + audioSamplesDuration(uint64(spf))
-	dbg("[AUDIO] pacing reservoir: %d frames (%v)", pacingFrames, pacingDuration)
 
 	// Prewarm the capture while waiting for the first presentable video frame.
 	// GStreamer starts producing PCM immediately; continuously consuming and
@@ -1476,7 +1467,7 @@ videoReady:
 			}
 			return fmt.Errorf("audio read first frame: %w", err)
 		}
-		if firstFrameSize > 0 && audioFrameIsStale(firstFramePosition.PTS, time.Now(), audioStream.latencySamples, startupSendLead) {
+		if firstFrameSize > 0 && audioFrameIsStale(firstFramePosition.PTS, time.Now(), audioStream.latencySamples, minimumAudioSendLead) {
 			catchupFrames++
 			if catchupFrames >= maximumInitialCatchupFrames {
 				age := time.Since(firstFramePosition.PTS)
@@ -1490,6 +1481,14 @@ videoReady:
 		dbg("[AUDIO] discarded %d timestamped startup frames to restore positive playout lead", catchupFrames)
 	}
 	timestampedAudio := !firstFramePosition.PTS.IsZero()
+	pacingFrames := uint32(0)
+	if timestampedAudio {
+		dbg("[AUDIO] frame delivery follows timestamped source callbacks")
+	} else {
+		pacingFrames = audioPacingFramesForLatency(audioStream.latencySamples, spf)
+		pacingDuration := audioSamplesDuration(uint64(spf) * uint64(pacingFrames))
+		dbg("[AUDIO] fallback pacing reservoir: %d frames (%v)", pacingFrames, pacingDuration)
+	}
 	if firstFramePosition.PTS.IsZero() {
 		// Transparent raw fallback: preserve the historical read-time anchor.
 		firstFramePosition.PTS = time.Now()
@@ -1529,7 +1528,12 @@ videoReady:
 					continue
 				}
 				announceMu.Lock()
-				rtpNow, announcedAt, ok := rtpClock.latestBoundary()
+				// Sample both clocks at the current host instant. Quantizing this
+				// mapping to a codec-frame boundary makes successive one-second
+				// announces jump by either 125 or 126 frames and invites receiver
+				// phase corrections.
+				announcedAt := time.Now()
+				rtpNow, ok := rtpClock.rtpAt(announcedAt)
 				if !ok {
 					announceMu.Unlock()
 					continue
@@ -1650,11 +1654,11 @@ videoReady:
 			framePTS = firstFramePosition.PTS.Add(audioSamplesDuration(uint64(frameCount) * uint64(spf)))
 			framePosition.PTS = framePTS
 		}
-		// The reservoir delay is paid once when the pacer establishes its anchor.
-		// After that, this loop reads at most one codec frame ahead of the next RTP
-		// target. Reserving the full startup duration again can discard every other
-		// frame from a healthy capture source with a stable, higher-buffer phase.
-		if !usingFirstFrame && timestampedAudio && audioFrameIsStale(framePTS, time.Now(), audioStream.latencySamples, steadySendLead) {
+		// The source callback may deliver multiple frames after a scheduler stall.
+		// Keep every frame whose render deadline is still in the future and let the
+		// bounded burst sender catch up. Discarding a recoverable frame creates an
+		// RTP hole that the receiver can only render as missing audio.
+		if !usingFirstFrame && timestampedAudio && audioFrameIsStale(framePTS, time.Now(), audioStream.latencySamples, 0) {
 			staleFrames++
 			if staleFrames == 1 || staleFrames%100 == 0 {
 				dbg("[AUDIO] dropping stale source frame %v old (latency=%v, dropped=%d)",
@@ -1691,16 +1695,10 @@ videoReady:
 		copy(payload, frameBuf[:n])
 
 		frameCount++
-		pacingDeadline := time.Time{}
-		if timestampedAudio {
-			pacingBudget := audioLatencyDuration(audioStream.latencySamples) - defaultAudioLatencyLow
-			if pacingBudget < 0 {
-				pacingBudget = 0
+		if !timestampedAudio {
+			if err := framePacer.wait(ctx, frameRTP, spf); err != nil {
+				return err
 			}
-			pacingDeadline = framePTS.Add(pacingBudget)
-		}
-		if err := framePacer.wait(ctx, frameRTP, spf, pacingDeadline); err != nil {
-			return err
 		}
 		redundantFrames := 0
 		if !useRedundancy {

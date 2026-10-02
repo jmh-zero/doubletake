@@ -401,20 +401,9 @@ func (c *audioRTPClock) rtpAt(localTime time.Time) (uint32, bool) {
 	if !c.valid || localTime.IsZero() {
 		return 0, false
 	}
-	deltaSamples := durationToAudioSamples(localTime.Sub(c.anchorPTS))
-	return c.anchorRTP + uint32(deltaSamples), true
-}
-
-// latestBoundary returns the sample boundary immediately after the most recent
-// frame. TimeAnnounce must map RTP and network time for the same instant; this
-// future/apply boundary avoids assuming that the audio device clock runs at
-// exactly the host clock's rate.
-func (c *audioRTPClock) latestBoundary() (uint32, time.Time, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if !c.valid || c.lastFramePTS.IsZero() {
-		return 0, time.Time{}, false
-	}
-	return c.lastFrameRTP + c.lastFrameCount,
-		c.lastFramePTS.Add(audioSamplesDuration(uint64(c.lastFrameCount))), true
+	// Refresh the interpolation anchor with every captured frame. This follows
+	// the source sample clock over long runs while still producing a continuous
+	// current RTP value between callbacks for TimeAnnounce.
+	deltaSamples := durationToAudioSamples(localTime.Sub(c.lastFramePTS))
+	return c.lastFrameRTP + uint32(deltaSamples), true
 }

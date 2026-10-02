@@ -43,17 +43,20 @@ func TestAudioCapturePipelineUsesTimestampedFramingWhenAvailable(t *testing.T) {
 	}
 }
 
-func TestPulseMonitorSourceRequestsBoundedLatency(t *testing.T) {
-	args := strings.Join(pulseMonitorSourceArgs("test.monitor"), " ")
+func TestPulseMonitorSourceSeparatesStallBufferFromFragment(t *testing.T) {
+	args := strings.Join(pulseMonitorSourceArgs("test.monitor", AudioCodecALAC), " ")
 	for _, want := range []string{
 		"pulsesrc",
 		"device=test.monitor",
-		"buffer-time=10000",
-		"latency-time=10000",
+		"buffer-time=250000",
+		"latency-time=7982",
 	} {
 		if !strings.Contains(args, want) {
 			t.Fatalf("Pulse monitor source %q does not contain %q", args, want)
 		}
+	}
+	if got := audioCaptureFragmentTime(AudioCodecAACELD); got != 10885*time.Microsecond {
+		t.Fatalf("AAC-ELD capture fragment = %v, want 10.885ms", got)
 	}
 }
 
@@ -69,12 +72,12 @@ func TestAudioMonitorSourceSelection(t *testing.T) {
 		{
 			name: "Pulse monitor preferred when both plugins exist", hasPulse: true,
 			monitor: "test.monitor", hasPipeWire: true, wantSource: "pulse",
-			wantArgs: []string{"pulsesrc", "device=test.monitor", "buffer-time=10000", "latency-time=10000"},
+			wantArgs: []string{"pulsesrc", "device=test.monitor", "buffer-time=250000", "latency-time=7982"},
 		},
 		{
 			name: "native Pulse monitor", hasPulse: true,
 			monitor: "test.monitor", wantSource: "pulse",
-			wantArgs: []string{"pulsesrc", "device=test.monitor", "buffer-time=10000", "latency-time=10000"},
+			wantArgs: []string{"pulsesrc", "device=test.monitor", "buffer-time=250000", "latency-time=7982"},
 		},
 		{
 			name: "PipeWire fallback without Pulse plugin", hasPipeWire: true, wantSource: "pipewire",
@@ -88,7 +91,7 @@ func TestAudioMonitorSourceSelection(t *testing.T) {
 		{name: "no source plugin", wantSource: ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			args, source := selectAudioMonitorSource(test.hasPulse, test.monitor, test.hasPipeWire)
+			args, source := selectAudioMonitorSource(test.hasPulse, test.monitor, test.hasPipeWire, AudioCodecALAC)
 			if source != test.wantSource {
 				t.Fatalf("source = %q, want %q", source, test.wantSource)
 			}
@@ -294,12 +297,12 @@ func TestAudioRTPClockUsesCapturedSampleClockWithoutLongTermWallDrift(t *testing
 	if wallDerived := epoch + uint32(durationToAudioSamples(elapsedWall)); wallDerived == last {
 		t.Fatal("test clock did not create a measurable wall/sample-rate difference")
 	}
-	latestRTP, latestPTS, ok := clock.latestBoundary()
-	wantBoundaryRTP := last + 352
-	wantBoundaryPTS := lastPosition.PTS.Add(audioSamplesDuration(352))
-	if !ok || latestRTP != wantBoundaryRTP || !latestPTS.Equal(wantBoundaryPTS) {
-		t.Fatalf("latest correlation = rtp %#x pts %v ok=%t, want %#x %v true",
-			latestRTP, latestPTS, ok, wantBoundaryRTP, wantBoundaryPTS)
+	announceAt := lastPosition.PTS.Add(137 * time.Millisecond)
+	announcedRTP, ok := clock.rtpAt(announceAt)
+	wantAnnouncedRTP := last + uint32(durationToAudioSamples(137*time.Millisecond))
+	if !ok || announcedRTP != wantAnnouncedRTP {
+		t.Fatalf("current interpolation = rtp %#x ok=%t, want %#x true",
+			announcedRTP, ok, wantAnnouncedRTP)
 	}
 }
 
