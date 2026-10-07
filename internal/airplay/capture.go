@@ -929,6 +929,26 @@ func appendGstStage(args []string, stage gstStage) []string {
 // HiDPI source (for example 3024x1964 becomes 1109x720), which x264 cannot
 // encode and some legacy mirror decoders reject. videoscale adds any necessary
 // letterbox or pillarbox bars instead of stretching the image.
+// aspectFitDimensions returns the largest even size with the source's aspect
+// ratio that fits the canvas, and whether it leaves any part of the canvas to
+// pad. Only the source's aspect ratio is used, so portal coordinates are fine.
+func aspectFitDimensions(sourceWidth, sourceHeight, canvasWidth, canvasHeight int) (width, height int, padded bool) {
+	if sourceWidth <= 0 || sourceHeight <= 0 || canvasWidth <= 1 || canvasHeight <= 1 {
+		return 0, 0, false
+	}
+	width, height = canvasWidth, canvasHeight
+	if sourceWidth*canvasHeight > canvasWidth*sourceHeight {
+		height = canvasWidth * sourceHeight / sourceWidth
+	} else {
+		width = canvasHeight * sourceWidth / sourceHeight
+	}
+	width, height = width&^1, height&^1
+	if width < 2 || height < 2 || (width == canvasWidth && height == canvasHeight) {
+		return 0, 0, false
+	}
+	return width, height, true
+}
+
 func receiverScaleStages(maxWidth, maxHeight int) []gstStage {
 	if maxWidth <= 0 || maxHeight <= 0 {
 		return nil
@@ -1114,19 +1134,34 @@ func buildSystemWaylandVideoPipeline(fd int, nodeID uint32, fps int, encoder enc
 // with VA, then requests a freshly allocated plain video/x-raw result. Drivers
 // may expose that result as ordinary memory or a CPU-mappable VA allocation;
 // either way, downstream never retains the portal-owned source buffer.
-func buildVAPostprocPlainRawWaylandVideoPipeline(fd int, nodeID uint32, fps int, encoder encoderResult, maxWidth, maxHeight int, timestampedOutput bool) []string {
-	args := append([]string{"--quiet"}, pipeWireVideoSourceStage(fd, nodeID, fps, false)...)
-	args = appendGstStage(args, gstStage{"video/x-raw(ANY),pixel-aspect-ratio=1/1"})
-	args = appendGstStage(args, gstStage{"vapostproc", "disable-passthrough=true", "add-borders=true"})
+//
+// When the portal's aspect ratio differs from the receiver canvas, vapostproc
+// scales to the largest fitting size without borders and videoscale pads the
+// result. vapostproc's own add-borders leaves the padding uninitialized on some
+// drivers (Mesa radeonsi), which displays as green bars.
+func buildVAPostprocPlainRawWaylandVideoPipeline(fd int, nodeID uint32, fps int, encoder encoderResult, maxWidth, maxHeight int, portalSize [2]int, timestampedOutput bool) []string {
 	postprocFormat, ok := vaPostprocSystemFormat(encoder.rawFormat)
 	if !ok {
 		return buildSystemWaylandVideoPipeline(fd, nodeID, fps, encoder, maxWidth, maxHeight, timestampedOutput)
 	}
-	caps := fmt.Sprintf("video/x-raw,format=%s", postprocFormat)
-	if maxWidth > 1 && maxHeight > 1 {
-		caps += fmt.Sprintf(",width=%d,height=%d,pixel-aspect-ratio=1/1", maxWidth&^1, maxHeight&^1)
+	args := append([]string{"--quiet"}, pipeWireVideoSourceStage(fd, nodeID, fps, false)...)
+	args = appendGstStage(args, gstStage{"video/x-raw(ANY),pixel-aspect-ratio=1/1"})
+	canvasWidth, canvasHeight := maxWidth&^1, maxHeight&^1
+	fitWidth, fitHeight, padded := aspectFitDimensions(portalSize[0], portalSize[1], canvasWidth, canvasHeight)
+	if padded {
+		args = appendGstStage(args, gstStage{"vapostproc", "disable-passthrough=true"})
+		args = appendGstStage(args, gstStage{fmt.Sprintf("video/x-raw,format=%s,width=%d,height=%d,pixel-aspect-ratio=1/1", postprocFormat, fitWidth, fitHeight)})
+		for _, stage := range receiverScaleStages(canvasWidth, canvasHeight) {
+			args = appendGstStage(args, stage)
+		}
+	} else {
+		args = appendGstStage(args, gstStage{"vapostproc", "disable-passthrough=true", "add-borders=true"})
+		caps := fmt.Sprintf("video/x-raw,format=%s", postprocFormat)
+		if canvasWidth > 1 && canvasHeight > 1 {
+			caps += fmt.Sprintf(",width=%d,height=%d,pixel-aspect-ratio=1/1", canvasWidth, canvasHeight)
+		}
+		args = appendGstStage(args, gstStage{caps})
 	}
-	args = appendGstStage(args, gstStage{caps})
 	if postprocFormat != encoder.rawFormat {
 		args = appendGstStage(args, gstStage{"videoconvert"})
 		args = appendGstStage(args, gstStage{fmt.Sprintf("video/x-raw,format=%s", encoder.rawFormat)})
@@ -1141,26 +1176,27 @@ func buildVAPostprocPlainRawWaylandVideoPipeline(fd int, nodeID uint32, fps int,
 	return appendGstVideoEncoding(args, encoder, timestampedOutput)
 }
 
-// buildWaylandVideoPipeline deliberately ignores portalSize. The ScreenCast
+// buildWaylandVideoPipeline never pins pixels to portalSize. The ScreenCast
 // portal reports it in compositor coordinates, which may differ from the
-// negotiated pixel dimensions under fractional scaling. Both branches instead
-// fit the actual video stream directly to the receiver's canvas.
-func buildWaylandVideoPipeline(fd int, nodeID uint32, fps int, encoder encoderResult, maxWidth, maxHeight int, _ [2]int, timestampedOutput bool, hasElement func(string) bool) []string {
+// negotiated pixel dimensions under fractional scaling. Every branch instead
+// fits the actual video stream to the receiver's canvas; the VA postprocessing
+// branch uses only portalSize's aspect ratio, which scaling does not change.
+func buildWaylandVideoPipeline(fd int, nodeID uint32, fps int, encoder encoderResult, maxWidth, maxHeight int, portalSize [2]int, timestampedOutput bool, hasElement func(string) bool) []string {
 	if canBuildVAWaylandVideoPipeline(encoder, hasElement) {
 		return buildVAWaylandVideoPipeline(fd, nodeID, fps, encoder, maxWidth, maxHeight, timestampedOutput)
 	}
 	if canBuildVAPostprocPlainRawWaylandVideoPipeline(encoder, hasElement) {
-		return buildVAPostprocPlainRawWaylandVideoPipeline(fd, nodeID, fps, encoder, maxWidth, maxHeight, timestampedOutput)
+		return buildVAPostprocPlainRawWaylandVideoPipeline(fd, nodeID, fps, encoder, maxWidth, maxHeight, portalSize, timestampedOutput)
 	}
 	return buildSystemWaylandVideoPipeline(fd, nodeID, fps, encoder, maxWidth, maxHeight, timestampedOutput)
 }
 
-func buildWaylandVideoPipelineForPlan(fd int, nodeID uint32, fps int, plan waylandCapturePlan, maxWidth, maxHeight int, timestampedOutput bool) []string {
+func buildWaylandVideoPipelineForPlan(fd int, nodeID uint32, fps int, plan waylandCapturePlan, maxWidth, maxHeight int, portalSize [2]int, timestampedOutput bool) []string {
 	switch plan.mode {
 	case waylandPipelineVAMemory:
 		return buildVAWaylandVideoPipeline(fd, nodeID, fps, plan.encoder, maxWidth, maxHeight, timestampedOutput)
 	case waylandPipelineVAPostprocPlainRaw:
-		return buildVAPostprocPlainRawWaylandVideoPipeline(fd, nodeID, fps, plan.encoder, maxWidth, maxHeight, timestampedOutput)
+		return buildVAPostprocPlainRawWaylandVideoPipeline(fd, nodeID, fps, plan.encoder, maxWidth, maxHeight, portalSize, timestampedOutput)
 	default:
 		return buildSystemWaylandVideoPipeline(fd, nodeID, fps, plan.encoder, maxWidth, maxHeight, timestampedOutput)
 	}
@@ -1307,7 +1343,7 @@ func startPreparedWaylandCapturePlans(
 	return nil, fmt.Errorf("no Wayland capture pipeline produced a decodable startup sequence:\n  %s", strings.Join(attemptErrors, "\n  "))
 }
 
-func startWaylandCaptureAttempt(ctx context.Context, cfg CaptureConfig, plan waylandCapturePlan, nodeID uint32, pwFd *os.File, _ [2]int, timestampedOutput bool) (*ScreenCapture, error) {
+func startWaylandCaptureAttempt(ctx context.Context, cfg CaptureConfig, plan waylandCapturePlan, nodeID uint32, pwFd *os.File, portalSize [2]int, timestampedOutput bool) (*ScreenCapture, error) {
 	captureCtx, cancel := context.WithCancel(ctx)
 
 	fps := cfg.FPS
@@ -1321,7 +1357,7 @@ func startWaylandCaptureAttempt(ctx context.Context, cfg CaptureConfig, plan way
 	// VAMemory without an extra download and upload.
 	const pwFdNum = 3
 	gstArgs := buildWaylandVideoPipelineForPlan(
-		pwFdNum, nodeID, fps, plan, cfg.MaxWidth, cfg.MaxHeight, timestampedOutput)
+		pwFdNum, nodeID, fps, plan, cfg.MaxWidth, cfg.MaxHeight, portalSize, timestampedOutput)
 
 	dbg("[CAPTURE] gst-launch-1.0 (wayland) %s", strings.Join(gstArgs, " "))
 	cmd := exec.CommandContext(captureCtx, "gst-launch-1.0", gstArgs...)

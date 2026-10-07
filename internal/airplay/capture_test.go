@@ -987,7 +987,7 @@ func TestSystemWaylandPipelineDetachesBeforeRetention(t *testing.T) {
 
 func TestVAPostprocPlainRawWaylandPipelineScalesBeforeRetention(t *testing.T) {
 	encoder := encoderResult{parts: gstStage{"nvh265enc"}, rawFormat: "P010_10LE", codec: VideoCodecHEVC}
-	pipeline := buildVAPostprocPlainRawWaylandVideoPipeline(3, 42, 30, encoder, 1920, 1080, true)
+	pipeline := buildVAPostprocPlainRawWaylandVideoPipeline(3, 42, 30, encoder, 1920, 1080, [2]int{}, true)
 	joined := strings.Join(pipeline, " ")
 	for _, forbidden := range []string{"always-copy", "memory:VAMemory", "videoconvert", "videoscale", "width=1536", "height=960"} {
 		if strings.Contains(joined, forbidden) {
@@ -1009,9 +1009,50 @@ func TestVAPostprocPlainRawWaylandPipelineScalesBeforeRetention(t *testing.T) {
 	}
 }
 
+func TestVAPostprocPlainRawWaylandPipelinePadsWithVideoscale(t *testing.T) {
+	encoder := encoderResult{parts: gstStage{"vulkanh264enc"}, rawFormat: "NV12", needsVulkan: true}
+	// A 3:2 laptop panel in portal coordinates; only its aspect ratio is used.
+	pipeline := buildVAPostprocPlainRawWaylandVideoPipeline(3, 42, 30, encoder, 1920, 1080, [2]int{1440, 960}, true)
+	joined := strings.Join(pipeline, " ")
+	if strings.Contains(joined, "add-borders=true ! video/x-raw,format=NV12,width=1920") ||
+		strings.Contains(joined, "vapostproc disable-passthrough=true add-borders=true") {
+		t.Fatalf("vapostproc must not add borders it may leave uninitialized: %s", joined)
+	}
+	wantOrder := []string{
+		"!", "vapostproc", "disable-passthrough=true",
+		"!", "video/x-raw,format=NV12,width=1620,height=1080,pixel-aspect-ratio=1/1",
+		"!", "videoscale", "add-borders=true",
+		"!", "video/x-raw,width=1920,height=1080,pixel-aspect-ratio=1/1",
+		"!", "compositor",
+	}
+	if !containsPipelineSequence(pipeline, wantOrder) {
+		t.Fatalf("VA postprocessing must fit the aspect ratio and pad with videoscale: %s", joined)
+	}
+}
+
+func TestAspectFitDimensions(t *testing.T) {
+	for _, test := range []struct {
+		source, canvas [2]int
+		want           [2]int
+		wantPadded     bool
+	}{
+		{source: [2]int{2880, 1920}, canvas: [2]int{1920, 1080}, want: [2]int{1620, 1080}, wantPadded: true},
+		{source: [2]int{3440, 1440}, canvas: [2]int{1920, 1080}, want: [2]int{1920, 802}, wantPadded: true},
+		{source: [2]int{2560, 1440}, canvas: [2]int{1920, 1080}},
+		{source: [2]int{0, 0}, canvas: [2]int{1920, 1080}},
+		{source: [2]int{2880, 1920}, canvas: [2]int{0, 0}},
+	} {
+		width, height, padded := aspectFitDimensions(test.source[0], test.source[1], test.canvas[0], test.canvas[1])
+		if padded != test.wantPadded || (padded && [2]int{width, height} != test.want) {
+			t.Errorf("aspectFitDimensions(%v, %v) = %dx%d padded=%t, want %v padded=%t",
+				test.source, test.canvas, width, height, padded, test.want, test.wantPadded)
+		}
+	}
+}
+
 func TestVAPostprocPlainRawWaylandPipelineConvertsX265LayoutAfterScale(t *testing.T) {
 	encoder := encoderResult{parts: gstStage{"x265enc"}, rawFormat: "I420_10LE", codec: VideoCodecHEVC}
-	pipeline := buildVAPostprocPlainRawWaylandVideoPipeline(3, 42, 30, encoder, 1920, 1080, true)
+	pipeline := buildVAPostprocPlainRawWaylandVideoPipeline(3, 42, 30, encoder, 1920, 1080, [2]int{}, true)
 	wantOrder := []string{
 		"vapostproc", "disable-passthrough=true", "add-borders=true",
 		"!", "video/x-raw,format=P010_10LE,width=1920,height=1080,pixel-aspect-ratio=1/1",
@@ -1068,7 +1109,7 @@ func TestVAPostprocPlainRawWaylandPipelineSelection(t *testing.T) {
 func TestVAPostprocPlainRawWaylandPipelineSanitizesReceiverDimensions(t *testing.T) {
 	encoder := encoderResult{parts: gstStage{"openh264enc"}, rawFormat: "I420"}
 	for _, size := range [][2]int{{0, 0}, {1279, 719}, {1, 1}} {
-		pipeline := buildVAPostprocPlainRawWaylandVideoPipeline(3, 42, 30, encoder, size[0], size[1], true)
+		pipeline := buildVAPostprocPlainRawWaylandVideoPipeline(3, 42, 30, encoder, size[0], size[1], [2]int{}, true)
 		joined := strings.Join(pipeline, " ")
 		if size[0] > 1 && size[1] > 1 {
 			if want := "width=1278,height=718,pixel-aspect-ratio=1/1"; !strings.Contains(joined, want) {
@@ -1126,7 +1167,7 @@ func TestWaylandEncoderPathMatrix(t *testing.T) {
 				t.Fatalf("native VA path = %t, want %t: %s", gotNativeVA, test.wantVA, joined)
 			}
 			if !test.wantVA {
-				for _, required := range []string{"vapostproc disable-passthrough=true add-borders=true", "video/x-raw,format=" + test.encoder.rawFormat} {
+				for _, required := range []string{"vapostproc disable-passthrough=true", "videoscale add-borders=true", "video/x-raw,format=" + test.encoder.rawFormat} {
 					if !strings.Contains(joined, required) {
 						t.Fatalf("accelerated system path is missing %q before %s encoding: %s", required, test.encoder.rawFormat, joined)
 					}
@@ -1568,7 +1609,7 @@ func TestWaylandPlansUsePortableOutputRateControl(t *testing.T) {
 	for _, mode := range []waylandPipelineMode{waylandPipelineSystemMemory, waylandPipelineVAMemory, waylandPipelineVAPostprocPlainRaw} {
 		for _, fps := range []int{24, 30, 60} {
 			plan := waylandCapturePlan{encoder: encoder, mode: mode}
-			args := buildWaylandVideoPipelineForPlan(3, 42, fps, plan, 1920, 1080, true)
+			args := buildWaylandVideoPipelineForPlan(3, 42, fps, plan, 1920, 1080, [2]int{}, true)
 			pipeline := strings.Join(args, " ")
 			if strings.Contains(pipeline, "max-framerate") {
 				t.Fatalf("pipeline used a source caps field rejected by some portals: %s", pipeline)
